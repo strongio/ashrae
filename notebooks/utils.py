@@ -200,7 +200,7 @@ class TimeSeriesStateNN(torch.nn.Module):
 
 
 def make_nns(num_predictors: int, embed_inputs: dict, hidden: tuple, num_out: int) -> tuple:
-    in_features = len(predictors)
+    in_features = num_predictors
     for ei in embed_inputs.values():
         in_features -= 1
         in_features += ei['embedding_dim']

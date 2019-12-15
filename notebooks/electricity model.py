@@ -167,7 +167,9 @@ for epoch in range(25):
                 continue
             nm = 'val' if is_val else 'train'
             with torch.set_grad_enabled(nm == 'train'):
-                loss = forward_backward(model=kf, batch=batch, delete_interval='14D')
+                loss = forward_backward(
+                    model=kf, batch=batch, delete_interval='14D', random_state=rs if nm == 'val' else None
+                )
             if nm == 'train':
                 kf.optimizer.zero_grad()
             kf.df_loss.append({'value' : loss.item(), 'dataset' : nm, 'epoch' : epoch})

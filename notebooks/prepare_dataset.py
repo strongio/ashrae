@@ -89,7 +89,9 @@ meta_preds.append('square_feet_log10')
 
 meta_scaler = DataFrameScaler(meta_preds).fit(df_meta_predictors)
 df_meta_predictors = meta_scaler.transform(df_meta_predictors, keep_cols=['site_id', 'building_id', 'primary_use'])
+
 meta_preds.append('primary_use')
+primary_uses = df_meta_predictors['primary_use'].unique()
 # -
 
 df_holidays = calendar().\
@@ -117,7 +119,12 @@ df_tv_predictors_train = df_weather_train_pp.\
     ).\
     reset_index(drop=True)
 
-df_tv_predictors_train['hour_in_day'] = df_tv_predictors_train['timestamp'].dt.hour
+# df_tv_predictors_train['hour_in_day'] = df_tv_predictors_train['timestamp'].dt.hour
+df_tv_predictors_train = pd.concat([
+    df_tv_predictors_train, 
+    pd.get_dummies(df_tv_predictors_train['timestamp'].dt.hour, prefix='hour', drop_first=True)
+], 
+    axis=1)
 
 df_tv_predictors_train = pd.concat([
     df_tv_predictors_train, 

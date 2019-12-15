@@ -26,7 +26,7 @@ from copy import copy
 
 from itertools import zip_longest
 
-from utils import DataFrameScaler, TimeSeriesStateNN, loss_plot, forward_backward
+from utils import DataFrameScaler, TimeSeriesStateNN, loss_plot, forward_backward, make_nns
 
 import torch
 from torch.utils.data import DataLoader
@@ -79,46 +79,31 @@ print("...finished")
 
 # ## NN Module
 
-# +
 predictors = list(electric_dataset.measures[1])
-pred_nn_module = TimeSeriesStateNN(
-    embed_inputs = {
+print(predictors)
+pred_nn_module, pretrain_nn_module = make_nns(
+    num_predictors=len(predictors),
+    embed_inputs={
         predictors.index('primary_use') : {
             'num_embeddings' : len(primary_uses), 
             'embedding_dim' : 3
         },
-#         predictors.index('hour_in_day') : {
-#             'num_embeddings' : 24, 
-#             'embedding_dim' : 10
-#         },
         predictors.index('holiday') : {
             'num_embeddings' : len(holidays) + 1, 
             'embedding_dim' : 2
         }
     },
-    sub_module = torch.nn.Sequential(
-        torch.nn.Linear(in_features=len(predictors) - 2 + (3 + 2), out_features=50),
-        torch.nn.Tanh(),
-        torch.nn.Linear(50, 25),
-        torch.nn.Tanh(),
-        torch.nn.Linear(in_features=25, out_features=12, bias=False)
-    )
+    hidden=(50,25),
+    num_out=12
 )
 
-print(predictors)
-# -
+# ### Pretraining
 
-# ## Pretraining NN
-
-pretrain_nn_module = copy(pred_nn_module)
-pretrain_nn_module.sub_module = torch.nn.Sequential(
-    *pred_nn_module.sub_module[:-1], 
-    torch.nn.Linear(in_features=25, out_features=1, bias=True)
-)
+# +
 pretrain_nn_module.optimizer = torch.optim.Adam(pretrain_nn_module.parameters(), lr=.001)
 
 pretrain_nn_module.df_loss = []
-for epoch in range(25):
+for epoch in range(100):
     for i, batches in enumerate(zip_longest(electric_dl_train, electric_dl_val)):
         for is_val, batch in enumerate(batches):
             if not batch:
@@ -127,14 +112,17 @@ for epoch in range(25):
             y, X = batch.tensors
             with torch.set_grad_enabled(nm == 'train'):
                 prediction = pretrain_nn_module(X)
-                loss = torch.mean( (prediction[y==y] - y[y==y]) ** 2 )
+                loss = torch.mean( (prediction[y == y] - y[y == y]) ** 2 )
             if nm == 'train':
                 loss.backward()
                 pretrain_nn_module.optimizer.step()
                 pretrain_nn_module.optimizer.zero_grad()
             pretrain_nn_module.df_loss.append({'value' : loss.item(), 'dataset' : nm, 'epoch' : epoch})
             clear_output(wait=True)
-            print(loss_plot(pretrain_nn_module.df_loss) + ggtitle(f"Epoch {epoch}, {nm} batch {i}"))
+            print(loss_plot(pretrain_nn_module.df_loss) + ggtitle(f"Epoch {epoch}, batch {i}, {nm} loss {loss.item():.2f}"))
+        
+        torch.save(pretrain_nn_module.state_dict(), "../models/electricity/pretrain_nn_module_state_dict.pkl")
+# -
 
 # ## Train KF
 
@@ -165,8 +153,8 @@ kf = KalmanFilter(
 kf.design.process_covariance.set(kf.design.process_covariance.create().data / 100.)
 
 # optimizer:
-kf.optimizer = torch.optim.Adam(kf.parameters(), lr=.01)
-kf.optimizer.add_param_group({'params' : pred_nn_module.parameters(), 'lr' : .001})
+kf.optimizer = torch.optim.Adam(kf.parameters(), lr=.02)
+kf.optimizer.add_param_group({'params' : pred_nn_module.parameters(), 'lr' : .005})
 
 # +
 rs = np.random.RandomState(2019-12-12)
@@ -179,12 +167,12 @@ for epoch in range(25):
                 continue
             nm = 'val' if is_val else 'train'
             with torch.set_grad_enabled(nm == 'train'):
-                loss = forward_backward(model=kf, batch=batch, delete_interval='7D')
+                loss = forward_backward(model=kf, batch=batch, delete_interval='14D')
             if nm == 'train':
-                pretrain_nn_module.optimizer.zero_grad()
+                kf.optimizer.zero_grad()
             kf.df_loss.append({'value' : loss.item(), 'dataset' : nm, 'epoch' : epoch})
             clear_output(wait=True)
-            print(loss_plot(kf.df_loss) + ggtitle(f"Epoch {epoch}, {nm} batch {i}"))
+            print(loss_plot(kf.df_loss) + ggtitle(f"Epoch {epoch}, batch {i}, {nm} loss {loss.item():.2f}"))
     
         torch.save(kf.state_dict(), "../models/electricity/kf_state_dict.pkl")
         torch.save(pred_nn_module.state_dict(), "../models/electricity/pred_nn_module_state_dict.pkl")

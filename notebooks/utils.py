@@ -100,7 +100,7 @@ def remove_random_dates(batch: 'TimeSeriesDataset',
     if isinstance(delete_interval, str):
         delete_interval = np.timedelta64(1, delete_interval)
     else:
-        assert isinstance(delete_interval, Timedelta)
+        assert isinstance(delete_interval, pd.Timedelta)
     dt_unit = np.timedelta64(1, batch.dt_unit)
     assert delete_interval >= dt_unit
 
@@ -199,17 +199,36 @@ class TimeSeriesStateNN(torch.nn.Module):
         return self.sub_module[-1].out_features
 
 
+def make_nns(num_predictors: int, embed_inputs: dict, hidden: tuple, num_out: int) -> tuple:
+    in_features = len(predictors)
+    for ei in embed_inputs.values():
+        in_features -= 1
+        in_features += ei['embedding_dim']
+    layers = [
+        torch.nn.Linear(in_features=in_features, out_features=hidden[0]),
+        torch.nn.Tanh()
+    ]
+    for i, outf in enumerate(hidden[1:], 1):
+        layers.append(torch.nn.Linear(hidden[i-1], outf))
+        layers.append(torch.nn.Tanh())
+    
+    nn = TimeSeriesStateNN(
+        embed_inputs = embed_inputs,
+        sub_module = torch.nn.Sequential(*layers, torch.nn.Linear(in_features=hidden[-1], out_features=num_out, bias=False))
+    )
+    nn_for_pretrain = TimeSeriesStateNN(
+        embed_inputs = embed_inputs,
+        sub_module = torch.nn.Sequential(*layers, torch.nn.Linear(in_features=hidden[-1], out_features=1, bias=True))
+    )
+    return nn, nn_for_pretrain
+
+
 def forward_backward(model: 'KalmanFilter',
                      batch: 'TimeSeriesDataset',
                      **kwargs) -> 'TimeSeriesDataset':
     batch = remove_random_dates(batch, which=0, **kwargs)
     readings, predictors = batch.tensors
-    prediction = model(
-        readings,
-        start_datetimes=batch.start_datetimes,
-        predictors=predictors,
-        progress=True
-    )
+    prediction = model(readings, start_datetimes=batch.start_datetimes, predictors=predictors)
     lp = prediction.log_prob(readings)
     loss = -lp.mean()
     if loss.requires_grad:

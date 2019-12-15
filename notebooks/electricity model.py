@@ -119,13 +119,13 @@ pretrain_nn_module.optimizer = torch.optim.Adam(pretrain_nn_module.parameters(),
 
 pretrain_nn_module.df_loss = []
 for epoch in range(25):
-    for i, batches in enumerate(zip_longest(electric_dl_train,electric_dl_val)):
+    for i, batches in enumerate(zip_longest(electric_dl_train, electric_dl_val)):
         for is_val, batch in enumerate(batches):
             if not batch:
                 continue
             nm = 'val' if is_val else 'train'
             y, X = batch.tensors
-            with torch.set_grad(nm == 'train'):
+            with torch.set_grad_enabled(nm == 'train'):
                 prediction = pretrain_nn_module(X)
                 loss = torch.mean( (prediction[y==y] - y[y==y]) ** 2 )
             if nm == 'train':
@@ -178,7 +178,7 @@ for epoch in range(25):
             if not batch:
                 continue
             nm = 'val' if is_val else 'train'
-            with torch.set_grad(nm == 'train'):
+            with torch.set_grad_enabled(nm == 'train'):
                 loss = forward_backward(model=kf, batch=batch, delete_interval='7D')
             if nm == 'train':
                 pretrain_nn_module.optimizer.zero_grad()
@@ -188,3 +188,27 @@ for epoch in range(25):
     
         torch.save(kf.state_dict(), "../models/electricity/kf_state_dict.pkl")
         torch.save(pred_nn_module.state_dict(), "../models/electricity/pred_nn_module_state_dict.pkl")
+# -
+
+# ## Validation
+
+# +
+val_forecast_dt = np.datetime64('2016-06-01')
+
+df_val_forecast = []
+for batch in electric_dl_val:
+    with torch.no_grad():
+        readings, predictors = (t.clone() for t in batch.tensors)
+        readings[np.where(batch.times() > val_forecast_dt)] = float('nan')
+        predictors[torch.isnan(predictors)] = 0.
+        pred = kf(
+            readings,
+            start_datetimes=batch.start_datetimes,
+            predictors=predictors,
+            progress=True
+        )
+    df = pred.to_dataframe({'start_times': batch.start_times, 'group_names': batch.group_names}, **colname_config).\
+      query("measure=='meter_reading_clean_pp'").\
+      drop(columns=['measure'])
+    df_val_forecast.append(df)
+df_val_forecast = pd.concat(df_val_forecast)

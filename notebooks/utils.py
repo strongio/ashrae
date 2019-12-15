@@ -108,7 +108,7 @@ def remove_random_dates(batch: 'TimeSeriesDataset',
     num_groups, num_timesteps, _ = tens.shape
 
     num_units_in_delete_unit = int(delete_interval / dt_unit)
-    offset = np.random.choice(range(num_units_in_delete_unit), size=1)
+    offset = random_state.choice(range(num_units_in_delete_unit), size=1)
 
     time_as_delete_unit = np.floor(np.arange(offset, num_timesteps + offset) / num_units_in_delete_unit)
     time_as_delete_unit_unique = np.unique(time_as_delete_unit)

@@ -16,8 +16,10 @@
 # +
 try:
     from plotnine import *
+    from IPython.display import clear_output
 except ImportError:
     from fake_plotnine import *
+    clear_output = lambda wait: None
 
 import numpy as np
 import pandas as pd
@@ -35,13 +37,11 @@ from torch_kalman.kalman_filter import KalmanFilter
 from torch_kalman.process import LocalLevel, FourierSeasonDynamic, Season, NN
 from torch_kalman.utils.data import TimeSeriesDataset
 
-from IPython.display import clear_output
-
 torch.manual_seed(2019-12-12)
 np.random.seed(2019-12-12)
 # -
 
-from prepare_dataset import prepare_dataset, season_config, primary_uses, holidays
+from prepare_dataset import prepare_dataset, season_config, colname_config, primary_uses, holidays
 
 df_train_clean = pd.read_feather("../data/cleaned/df_train_clean.feather")
 

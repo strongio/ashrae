@@ -20,28 +20,21 @@ import numpy as np
 from torch_kalman.utils.data import TimeSeriesDataset
 from torch_kalman.utils.features import fourier_model_mat
 
-from utils import DataFrameScaler, date_expander
-
 from pandas.tseries.holiday import USFederalHolidayCalendar as calendar
-
-from IPython.display import clear_output
-
-import torch
 
 import os
 # -
+from ashrae import DATA_DIR
+from ashrae.preprocessing import DataFrameScaler, date_expander
 
 season_config = {
-    'season_start' : pd.Timestamp('2007-01-01'),  # arbitrary monday at midnight
-    'dt_unit' : 'h'
+    'season_start': pd.Timestamp('2007-01-01'),  # arbitrary monday at midnight
+    'dt_unit': 'h'
 }
 colname_config = {
-    'group_colname':'building_id',
-    'time_colname':'timestamp'
+    'group_colname': 'building_id',
+    'time_colname': 'timestamp'
 }
-
-DATA_DIR = "../data" if os.path.exists("../data") else "../../input/ashrae-energy-prediction"
-print(DATA_DIR)
 
 # ## Weather Data
 
@@ -50,12 +43,14 @@ print("Processing weather data...")
 # +
 df_weather_train = pd.read_csv(os.path.join(DATA_DIR, "weather_train.csv"), parse_dates=['timestamp'])
 
+
 def get_rel_humidity(air_temp: np.ndarray, dew_temp: np.ndarray) -> np.ndarray:
-    numer = np.exp( (17.625 * dew_temp) / (243.04 + dew_temp) )
-    denom = np.exp( (17.625 * air_temp) / (243.04 + air_temp) )
+    numer = np.exp((17.625 * dew_temp) / (243.04 + dew_temp))
+    denom = np.exp((17.625 * air_temp) / (243.04 + air_temp))
     return numer / denom
 
-df_weather_train['relative_humidity'] =\
+
+df_weather_train['relative_humidity'] = \
     get_rel_humidity(df_weather_train['air_temperature'], df_weather_train.pop('dew_temperature'))
 df_weather_train['is_raining'] = (df_weather_train['precip_depth_1_hr'].fillna(0.0) > 0.0).astype('int')
 
@@ -106,11 +101,11 @@ df_holidays = calendar().\
     assign(end= lambda df: df['start'] + pd.Timedelta('1D'),
            holiday = lambda df: df['holiday'].astype('category')).\
     pipe(date_expander,
-        start_dt_colname='start',
-        end_dt_colname='end',
-        time_unit='h',
-        new_colname='timestamp',
-        end_inclusive=False)
+         start_dt_colname='start',
+         end_dt_colname='end',
+         time_unit='h',
+         new_colname='timestamp',
+         end_inclusive=False)
 holidays = list(df_holidays['holiday'].cat.categories)
 df_holidays['holiday'].cat.add_categories(['None'], inplace=True)
 df_holidays['holiday'].cat.reorder_categories(new_categories=['None'] + holidays, inplace=True)
@@ -165,23 +160,23 @@ print("...finished")
 
 def prepare_dataset(df_readings: pd.DataFrame, reading_colname: str) -> TimeSeriesDataset:
     # join:
-    df_joined = df_meta_predictors.\
-        merge(df_tv_predictors_train, on=['site_id'], how='inner').\
-        merge(df_readings, on=['building_id', 'timestamp'], how='left').\
-        fillna({c : 0.0 for c in (meta_preds + tv_preds)})
-    
+    df_joined = df_meta_predictors. \
+        merge(df_tv_predictors_train, on=['site_id'], how='inner'). \
+        merge(df_readings, on=['building_id', 'timestamp'], how='left'). \
+        fillna({c: 0.0 for c in (meta_preds + tv_preds)})
+
     # filter out dates before the building started:
     _min_dts = df_joined.query(f"~{reading_colname}.isnull()").groupby('building_id')['timestamp'].min().to_dict()
-    df_joined = df_joined.\
-        assign(_min_dt = lambda df: df['building_id'].map(_min_dts)).\
+    df_joined = df_joined. \
+        assign(_min_dt=lambda df: df['building_id'].map(_min_dts)). \
         query("timestamp >= _min_dt")
-    
+
     # create dataset:
     dataset = TimeSeriesDataset.from_dataframe(
-                df_joined,
-                **colname_config,
-                measure_colnames=[reading_colname] + tv_preds + meta_preds,
-                dt_unit='h'
-            )
+        df_joined,
+        **colname_config,
+        measure_colnames=[reading_colname] + tv_preds + meta_preds,
+        dt_unit='h'
+    )
     # split into separate tensors for readings, preds:
-    return dataset.split_measures(slice(1), slice(1,None))
+    return dataset.split_measures(slice(1), slice(1, None))

@@ -14,11 +14,16 @@
 # ---
 
 # +
+from ashrae import DATA_DIR, PROJECT_ROOT
+from ashrae.nn import MultiSeriesStateNN, TimeSeriesStateNN
+from ashrae.preprocessing import DataFrameScaler
+from ashrae.training import forward_backward
+
 try:
     from plotnine import *
     from IPython.display import clear_output
 except ImportError:
-    from fake_plotnine import *
+    from ashrae.fake_plotnine import *
     clear_output = lambda wait: None
     
 import os
@@ -26,17 +31,13 @@ import os
 import numpy as np
 import pandas as pd
 
-from copy import copy
-
 from itertools import zip_longest
-
-from utils import DataFrameScaler, loss_plot, forward_backward, TimeSeriesStateNN, MultiSeriesStateNN
 
 import torch
 from torch.utils.data import DataLoader
 
 from torch_kalman.kalman_filter import KalmanFilter
-from torch_kalman.process import LocalLevel, FourierSeasonDynamic, Season, NN
+from torch_kalman.process import LocalLevel, FourierSeasonDynamic, NN
 from torch_kalman.utils.data import TimeSeriesDataset
 
 torch.manual_seed(2019-12-12)
@@ -44,16 +45,25 @@ np.random.seed(2019-12-12)
 rs = np.random.RandomState(2019-12-12)
 # -
 
-from prepare_dataset import prepare_dataset, season_config, colname_config, primary_uses, holidays, DATA_DIR
+from .prepare_dataset import prepare_dataset, season_config, colname_config, primary_uses, holidays
+
+
+def loss_plot(df_loss: pd.DataFrame):
+    return (
+            ggplot(pd.DataFrame(df_loss), aes(x='epoch', y='value')) +
+            stat_summary(fun_y=np.mean, geom='line') + facet_wrap("~dataset", scales='free') +
+            theme_bw() + theme(figure_size=(10, 4))
+    )
 
 NUM_EPOCHS_PRETRAIN_NN = os.environ.get("NUM_EPOCHS_PRETRAIN_NN", 200)
 NUM_EPOCHS_PRETRAIN_KF = os.environ.get("NUM_EPOCHS_PRETRAIN_KF", 20)
 NUM_EPOCHS_TRAIN_KF = os.environ.get("NUM_EPOCHS_TRAIN_KF", 30)
 
-os.makedirs("../models/electricity", exist_ok=True)
+MODEL_DIR = os.path.join(PROJECT_ROOT, "models", "electricity")
+os.makedirs(MODEL_DIR, exist_ok=True)
 
 df_meta = pd.read_csv(os.path.join(DATA_DIR, "building_metadata.csv"))
-df_train_clean = pd.read_feather("../clean-data/df_train_clean.feather")
+df_train_clean = pd.read_feather(os.path.join(PROJECT_ROOT, "clean-data", "df_train_clean.feather"))
 
 # ## Dataset
 
@@ -114,7 +124,7 @@ pretrain_nn_module.optimizer = torch.optim.Adam(pretrain_nn_module.parameters(),
 pretrain_nn_module.df_loss = []
 
 try:
-    pretrain_nn_module.load_state_dict(torch.load("../models/electricity/pretrain_nn_module_state_dict.pkl"))
+    pretrain_nn_module.load_state_dict(torch.load(f"{MODEL_DIR}/pretrain_nn_module_state_dict.pkl"))
     NUM_EPOCHS_PRETRAIN_NN = 0
 except FileNotFoundError:
     print("Pre-training NN-module...")
@@ -140,7 +150,7 @@ for epoch in range(NUM_EPOCHS_PRETRAIN_NN):
             pretrain_nn_module.df_loss.append({'value' : loss.item(), 'dataset' : nm, 'epoch' : epoch})
             print(loss_plot(pretrain_nn_module.df_loss) + ggtitle(f"Epoch {epoch}, batch {i}, {nm} loss {loss.item():.2f}"))
         
-    torch.save(pretrain_nn_module.state_dict(), "../models/electricity/pretrain_nn_module_state_dict.pkl")
+    torch.save(pretrain_nn_module.state_dict(), f"{MODEL_DIR}/pretrain_nn_module_state_dict.pkl")
 # -
 
 batch = next(iter(electric_dl_train))
@@ -198,8 +208,8 @@ kf_nn_only.optimizer.add_param_group({'params' : pred_nn_module.parameters(), 'l
 
 # +
 try:
-    kf_nn_only.load_state_dict(torch.load("../models/electricity/pretrain_kf_state_dict.pkl"))
-    pred_nn_module.load_state_dict(torch.load("../models/electricity/pretrain_pred_nn_module_state_dict.pkl"))
+    kf_nn_only.load_state_dict(torch.load(f"{MODEL_DIR}/pretrain_kf_state_dict.pkl"))
+    pred_nn_module.load_state_dict(torch.load(f"{MODEL_DIR}/pretrain_pred_nn_module_state_dict.pkl"))
     NUM_EPOCHS_PRETRAIN_KF = 0
 except FileNotFoundError:
     print("Pre-training KF NN-process...")
@@ -223,8 +233,8 @@ for epoch in range(NUM_EPOCHS_PRETRAIN_KF):
             clear_output(wait=True)
             print(loss_plot(kf_nn_only.df_loss) + ggtitle(f"Epoch {epoch}, batch {i}, {nm} loss {loss.item():.2f}"))
     
-    torch.save(kf_nn_only.state_dict(), "../models/electricity/pretrain_kf_state_dict.pkl")
-    torch.save(pred_nn_module.state_dict(), "../models/electricity/pretrain_pred_nn_module_state_dict.pkl")
+    torch.save(kf_nn_only.state_dict(), f"{MODEL_DIR}/pretrain_kf_state_dict.pkl")
+    torch.save(pred_nn_module.state_dict(), f"{MODEL_DIR}/pretrain_pred_nn_module_state_dict.pkl")
 # -
 
 # ### Final training
@@ -258,8 +268,8 @@ kf.optimizer.add_param_group({'params' : pred_nn_module.parameters(), 'lr' : .00
 
 # +
 try:
-    kf.load_state_dict(torch.load("../models/electricity/kf_state_dict.pkl"))
-    pred_nn_module.load_state_dict(torch.load("../models/electricity/pretrain_pred_nn_module_state_dict.pkl"))
+    kf.load_state_dict(torch.load(f"{MODEL_DIR}/kf_state_dict.pkl"))
+    pred_nn_module.load_state_dict(torch.load(f"{MODEL_DIR}/pretrain_pred_nn_module_state_dict.pkl"))
     NUM_EPOCHS_TRAIN_KF = 0
 except FileNotFoundError:
     print("Training KF...")
@@ -283,8 +293,8 @@ for epoch in range(NUM_EPOCHS_TRAIN_KF):
             clear_output(wait=True)
             print(loss_plot(kf.df_loss) + ggtitle(f"Epoch {epoch}, batch {i}, {nm} loss {loss.item():.2f}"))
     
-    torch.save(kf.state_dict(), "../models/electricity/kf_state_dict.pkl")
-    torch.save(pred_nn_module.state_dict(), "../models/electricity/pred_nn_module_state_dict.pkl")
+    torch.save(kf.state_dict(), f"{MODEL_DIR}/kf_state_dict.pkl")
+    torch.save(pred_nn_module.state_dict(), f"{MODEL_DIR}/pred_nn_module_state_dict.pkl")
 # -
 
 # ## Validation
@@ -294,6 +304,8 @@ val_forecast_dt = np.datetime64('2016-06-01')
 
 df_val_forecast = []
 for batch in electric_dl_val:
+    if 1191 not in batch.group_names:
+        continue
     with torch.no_grad():
         readings, predictors = (t.clone() for t in batch.tensors)
         readings[np.where(batch.times() > val_forecast_dt)] = float('nan')
@@ -312,7 +324,7 @@ df_val_forecast = pd.concat(df_val_forecast)
 
 # +
 df_example = df_val_forecast.\
-            query("building_id == building_id.sample().item() & timestamp.dt.month >= 5").\
+            query("(building_id == 1191) & (timestamp.dt.month >= 5)").\
               merge(df_electric_trainval, how='left')
 
 print(

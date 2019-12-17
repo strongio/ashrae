@@ -14,21 +14,19 @@
 # ---
 
 # + {"hideCode": false, "hidePrompt": false}
+from ashrae import DATA_DIR, PROJECT_ROOT
+from ashrae.preprocessing import clean_readings
+
 try:
     from plotnine import *
 except ImportError:
-    from fake_plotnine import *
+    from ashrae.fake_plotnine import *
 
-from utils import clean_readings
 
 import pandas as pd
-import numpy as np
 
 import os
 # -
-
-DATA_DIR = "../data" if os.path.exists("../data") else "../../input/ashrae-energy-prediction"
-print(DATA_DIR)
 
 # + {"hideCode": false, "hidePrompt": false, "cell_type": "markdown"}
 # ## Meter Types
@@ -158,15 +156,15 @@ print(
      facet_wrap("~meter",ncol=1)
 )
 # -
-
-os.makedirs("../clean-data", exist_ok=True)
+clean_data_dir = os.path.join(PROJECT_ROOT, "clean-data")
+os.makedirs(clean_data_dir, exist_ok=True)
 
 # + {"hideCode": false, "hidePrompt": false}
 # this takes a little bit
 df_train_clean = clean_readings(df_train_clean, group_colname='ts_id')
-df_train_clean.\
-    loc[:,['building_id','timestamp', 'meter', 'meter_reading', 'meter_reading_clean']].\
-    to_feather("../clean-data/df_train_clean.feather")
+df_train_clean. \
+    loc[:, ['building_id', 'timestamp', 'meter', 'meter_reading', 'meter_reading_clean']]. \
+    to_feather(os.path.join(clean_data_dir, "df_train_clean.feather"))
 
 # + {"hideCode": false, "hidePrompt": false}
 # TODO: save small series

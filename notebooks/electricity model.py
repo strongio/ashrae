@@ -176,15 +176,17 @@ print(
 
 # ## KF
 
-pred_nn_module = TimeSeriesStateNN.from_multi_series_nn(pretrain_nn_module, num_outputs=12)
-# freeze the network...
-for param in pred_nn_module.parameters():
-    param.requires_grad_(False)
-# except for the last two layers:
-pred_nn_module.sequential[-2].weight.requires_grad_(True)
-pred_nn_module.sequential[-2].bias.requires_grad_(True)
-pred_nn_module.sequential[-1].weight.requires_grad_(True)
-{k:v.requires_grad for k,v in pred_nn_module.named_parameters()}
+# +
+pred_nn_module = TimeSeriesStateNN(**pretrain_nn_module._init_kwargs)
+for to_param, from_param in zip(pred_nn_module.parameters(), pretrain_nn_module.parameters()):
+    to_param.data[:] = from_param.data[:]
+
+# output real-values:
+assert isinstance(pred_nn_module.sequential[-1], torch.nn.Tanh)
+del pred_nn_module.sequential[-1]
+
+pred_nn_module
+# -
 
 # ### Pretraining
 

@@ -5,10 +5,12 @@ class TimeSeriesStateNN(torch.nn.Module):
     def __init__(self,
                  num_predictors: int,
                  hidden: tuple,
-                 embed_inputs: dict = None):
+                 embed_inputs: dict = None,
+                 additional_layers: list = None):
         self._init_kwargs = {'num_predictors': num_predictors, 'hidden': hidden, 'embed_inputs': embed_inputs}
 
         embed_inputs = embed_inputs or {}
+        additional_layers = additional_layers or []
         super().__init__()
 
         # adjust input-dim for embed inputs:
@@ -22,7 +24,7 @@ class TimeSeriesStateNN(torch.nn.Module):
         for i, outf in enumerate(hidden):
             layers.append(torch.nn.Linear(in_features=in_features if i == 0 else hidden[i - 1], out_features=outf))
             layers.append(torch.nn.Tanh())
-        self.sequential = torch.nn.Sequential(*layers)
+        self.sequential = torch.nn.Sequential(*layers, *additional_layers)
 
         # create embedding modules:
         self.embed_modules = torch.nn.ModuleDict()
@@ -38,27 +40,6 @@ class TimeSeriesStateNN(torch.nn.Module):
             forward_idx.remove(idx)
         to_concat[0] = input[..., forward_idx]
         return self.sequential(torch.cat(to_concat, dim=-1))
-
-    @classmethod
-    def from_multi_series_nn(cls, multi_series_nn: 'MultiSeriesStateNN', num_outputs: int):
-        num_series = len(multi_series_nn.biases)
-
-        kwargs = dict(multi_series_nn._init_kwargs)
-        kwargs['hidden'] = kwargs['hidden'] + (num_series, num_outputs)
-
-        out = cls(**kwargs)
-        # remove output tanh:
-        del out.sequential[-1]
-        # output doesn't need bias:
-        out.sequential[-1].bias.data[:] = 0.
-        out.sequential[-1].bias.requires_grad_(False)
-        # remove penultimate tanh:
-        del out.sequential[-2]
-        # copy per-series weights/biases:
-        out.sequential[-2].weight.data[:] = torch.stack([w.data for w in multi_series_nn.weights])
-        out.sequential[-2].bias.data[:] = torch.cat([b.data for b in multi_series_nn.biases])
-
-        return out
 
 
 class MultiSeriesStateNN(TimeSeriesStateNN):

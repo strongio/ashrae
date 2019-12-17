@@ -22,11 +22,9 @@ try:
 except ImportError:
     from ashrae.fake_plotnine import *
 
-
 import pandas as pd
 
 import os
-# -
 
 # + {"hideCode": false, "hidePrompt": false, "cell_type": "markdown"}
 # ## Meter Types
@@ -124,21 +122,21 @@ excluded_ids['small'] = df_train.\
 print(f"Number of 'small' time-series excluded: {len(excluded_ids['small'])}")
 
 # near zero buildings:
-_good = df_train.\
-    query(f"~ts_id.isin({excluded_ids['small']})").\
-    query("near_zero_cumu < .5").\
-    groupby('ts_id')\
-    ['near_zero'].mean().\
-    reset_index().\
-    query("near_zero < 0.10").\
-    loc[:,'ts_id'].tolist()
+_good = df_train. \
+            loc[~df_train['ts_id'].isin(excluded_ids['small']), :]. \
+            query("near_zero_cumu < .5"). \
+            groupby('ts_id') \
+            ['near_zero'].mean(). \
+            reset_index(). \
+            query("near_zero < 0.10"). \
+            loc[:, 'ts_id'].tolist()
 
 excluded_ids['near_zero'] = list(set(all_ts_ids) - set(_good) - set(excluded_ids['small']))
 
 print(f"Number of time-series with too much near-zero-data excluded: {len(excluded_ids['near_zero'])}")
 
 df_train_clean = df_train. \
-    query(f"~ts_id.isin({excluded_ids['small']}) & ~ts_id.isin({excluded_ids['near_zero']})"). \
+    loc[~df_train['ts_id'].isin(excluded_ids['small']) & ~df_train['ts_id'].isin(excluded_ids['near_zero']),:].\
     query("near_zero_cumu < .5"). \
     reset_index(drop=True). \
     drop(columns=['near_zero', 'near_zero_cumu'])

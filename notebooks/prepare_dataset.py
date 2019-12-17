@@ -130,6 +130,19 @@ df_tv_predictors_train = pd.concat([
     df_tv_predictors_train, 
     fourier_model_mat(
         dt=df_tv_predictors_train['timestamp'], 
+        K=3,
+        period='daily',
+        start_dt=season_config['season_start'].to_datetime64(),
+        output_dataframe=True
+    )
+    ],
+    axis=1
+)
+
+df_tv_predictors_train = pd.concat([
+    df_tv_predictors_train, 
+    fourier_model_mat(
+        dt=df_tv_predictors_train['timestamp'], 
         K=4,
         period='yearly',
         start_dt=season_config['season_start'].to_datetime64(),

@@ -128,4 +128,4 @@ dmypy.json
 *.DS_Store
 data/*
 *.ipynb
-*.pkl
+*.feather

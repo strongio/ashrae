@@ -24,11 +24,17 @@ from utils import clean_readings
 import pandas as pd
 import numpy as np
 
+import os
+# -
+
+DATA_DIR = "../data" if os.path.exists("../data") else "../../input/ashrae-energy-prediction"
+print(DATA_DIR)
+
 # + {"hideCode": false, "hidePrompt": false, "cell_type": "markdown"}
 # ## Meter Types
 
 # + {"hideCode": false, "hidePrompt": false}
-df_train = pd.read_csv("../data/train.csv", parse_dates=['timestamp'])
+df_train = pd.read_csv(os.path.join(DATA_DIR, "train.csv"), parse_dates=['timestamp'])
 meter_mapping = {0: 'electricity', 1: 'chilledwater', 2: 'steam', 3: 'hotwater'}
 df_train['meter'] = df_train['meter'].map(meter_mapping).astype('category')
 df_train
@@ -151,13 +157,16 @@ print(
      scale_y_continuous(trans='log1p') +
      facet_wrap("~meter",ncol=1)
 )
+# -
+
+os.makedirs("../clean-data", exist_ok=True)
 
 # + {"hideCode": false, "hidePrompt": false}
 # this takes a little bit
 df_train_clean = clean_readings(df_train_clean, group_colname='ts_id')
 df_train_clean.\
     loc[:,['building_id','timestamp', 'meter', 'meter_reading', 'meter_reading_clean']].\
-    to_feather("../data/cleaned/df_train_clean.feather")
+    to_feather("../clean-data/df_train_clean.feather")
 
 # + {"hideCode": false, "hidePrompt": false}
 # TODO: save small series

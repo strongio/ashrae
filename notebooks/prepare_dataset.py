@@ -27,6 +27,8 @@ from pandas.tseries.holiday import USFederalHolidayCalendar as calendar
 from IPython.display import clear_output
 
 import torch
+
+import os
 # -
 
 season_config = {
@@ -38,12 +40,15 @@ colname_config = {
     'time_colname':'timestamp'
 }
 
+DATA_DIR = "../data" if os.path.exists("../data") else "../../input/ashrae-energy-prediction"
+print(DATA_DIR)
+
 # ## Weather Data
 
 print("Processing weather data...")
 
 # +
-df_weather_train = pd.read_csv("../data/weather_train.csv", parse_dates=['timestamp'])
+df_weather_train = pd.read_csv(os.path.join(DATA_DIR, "weather_train.csv"), parse_dates=['timestamp'])
 
 def get_rel_humidity(air_temp: np.ndarray, dew_temp: np.ndarray) -> np.ndarray:
     numer = np.exp( (17.625 * dew_temp) / (243.04 + dew_temp) )
@@ -76,7 +81,7 @@ print("... finished.")
 print("Processing external predictors...")
 
 # +
-df_meta_predictors = pd.read_csv("../data/building_metadata.csv").\
+df_meta_predictors = pd.read_csv(os.path.join(DATA_DIR, "building_metadata.csv")).\
     assign(primary_use=lambda df: df['primary_use'].astype('category').cat.codes)
 
 meta_preds = ['year_built']

@@ -20,6 +20,8 @@ try:
 except ImportError:
     from fake_plotnine import *
     clear_output = lambda wait: None
+    
+import os
 
 import numpy as np
 import pandas as pd
@@ -39,12 +41,19 @@ from torch_kalman.utils.data import TimeSeriesDataset
 
 torch.manual_seed(2019-12-12)
 np.random.seed(2019-12-12)
+rs = np.random.RandomState(2019-12-12)
 # -
 
-from prepare_dataset import prepare_dataset, season_config, colname_config, primary_uses, holidays
+from prepare_dataset import prepare_dataset, season_config, colname_config, primary_uses, holidays, DATA_DIR
 
-df_meta = pd.read_csv("../data/building_metadata.csv")
-df_train_clean = pd.read_feather("../data/cleaned/df_train_clean.feather")
+NUM_EPOCHS_PRETRAIN_NN = os.environ.get("NUM_EPOCHS_PRETRAIN_NN", 200)
+NUM_EPOCHS_PRETRAIN_KF = os.environ.get("NUM_EPOCHS_PRETRAIN_KF", 20)
+NUM_EPOCHS_TRAIN_KF = os.environ.get("NUM_EPOCHS_TRAIN_KF", 30)
+
+os.makedirs("../models/electricity", exist_ok=True)
+
+df_meta = pd.read_csv(os.path.join(DATA_DIR, "building_metadata.csv"))
+df_train_clean = pd.read_feather("../clean-data/df_train_clean.feather")
 
 # ## Dataset
 
@@ -102,9 +111,15 @@ pretrain_nn_module = MultiSeriesStateNN(
 
 # +
 pretrain_nn_module.optimizer = torch.optim.Adam(pretrain_nn_module.parameters(), lr=.002)
-
 pretrain_nn_module.df_loss = []
-for epoch in range(200):
+
+try:
+    pretrain_nn_module.load_state_dict(torch.load("../models/electricity/pretrain_nn_module_state_dict.pkl"))
+    NUM_EPOCHS_PRETRAIN_NN = 0
+except FileNotFoundError:
+    print("Pre-training NN-module...")
+    
+for epoch in range(NUM_EPOCHS_PRETRAIN_NN):
     for i, (tb, vb) in enumerate(zip_longest(electric_dl_train, electric_dl_val)):
         for nm, batch in {'train' : tb, 'val' : vb}.items():
             if not batch:
@@ -128,7 +143,25 @@ for epoch in range(200):
     torch.save(pretrain_nn_module.state_dict(), "../models/electricity/pretrain_nn_module_state_dict.pkl")
 # -
 
-# ## Train KF
+batch = next(iter(electric_dl_train))
+_, X = batch.tensors
+df_example = batch.tensor_to_dataframe(
+    tensor=pretrain_nn_module(X, series_idx=batch.group_names).unsqueeze(-1),
+    times=batch.times(),
+    group_names=batch.group_names,
+    group_colname='building_id',
+    time_colname='timestamp',
+    measures=['prediction']
+).query("building_id == building_id.sample().item()").merge(df_electric_trainval)
+print(
+    ggplot(df_example.query("timestamp.dt.month > 6"), aes(x='timestamp')) +
+    geom_line(aes(y='meter_reading_clean_pp')) +
+    geom_line(aes(y='prediction'), color='red', alpha=.60, size=1.5) +
+    theme(figure_size=(12,5)) +
+    ggtitle(str(df_example['building_id'].unique().item()))
+)
+
+# ## KF
 
 pred_nn_module = TimeSeriesStateNN.from_multi_series_nn(pretrain_nn_module, num_outputs=12)
 # freeze the network...
@@ -138,25 +171,80 @@ for param in pred_nn_module.parameters():
 pred_nn_module.sequential[-2].weight.requires_grad_(True)
 pred_nn_module.sequential[-2].bias.requires_grad_(True)
 pred_nn_module.sequential[-1].weight.requires_grad_(True)
+{k:v.requires_grad for k,v in pred_nn_module.named_parameters()}
+
+# ### Pretraining
+
+# +
+nn_process = NN(
+                id='predictors', 
+                input_dim=len(predictors), 
+                state_dim=pred_nn_module.sequential[-1].out_features,
+                nn_module=pred_nn_module,
+                add_module_params_to_process=False
+            ).add_measure('meter_reading_clean_pp')
+
+kf_nn_only = KalmanFilter(
+     processes=[nn_process],
+     measures=['meter_reading_clean_pp']
+    )
+
+# better init:
+kf_nn_only.design.process_covariance.set(kf_nn_only.design.process_covariance.create().data / 100.)
+
+# optimizer:
+kf_nn_only.optimizer = torch.optim.Adam(kf_nn_only.parameters(), lr=.01)
+kf_nn_only.optimizer.add_param_group({'params' : pred_nn_module.parameters(), 'lr' : .005})
+
+# +
+try:
+    kf_nn_only.load_state_dict(torch.load("../models/electricity/pretrain_kf_state_dict.pkl"))
+    pred_nn_module.load_state_dict(torch.load("../models/electricity/pretrain_pred_nn_module_state_dict.pkl"))
+    NUM_EPOCHS_PRETRAIN_KF = 0
+except FileNotFoundError:
+    print("Pre-training KF NN-process...")
+
+kf_nn_only.df_loss = []
+for epoch in range(NUM_EPOCHS_PRETRAIN_KF):
+    for i, (tb, vb) in enumerate(zip_longest(electric_dl_train, electric_dl_val)):
+        for nm, batch in {'train' : tb, 'val' : vb}.items():
+            if not batch:
+                continue
+            with torch.set_grad_enabled(nm == 'train'):
+                loss = forward_backward(
+                    model=kf_nn_only,
+                    batch=batch, 
+                    delete_interval='60D', 
+                    random_state=rs if nm == 'val' else None
+                )
+            if nm == 'train':
+                kf_nn_only.optimizer.zero_grad()
+            kf_nn_only.df_loss.append({'value' : loss.item(), 'dataset' : nm, 'epoch' : epoch})
+            clear_output(wait=True)
+            print(loss_plot(kf_nn_only.df_loss) + ggtitle(f"Epoch {epoch}, batch {i}, {nm} loss {loss.item():.2f}"))
+    
+    torch.save(kf_nn_only.state_dict(), "../models/electricity/pretrain_kf_state_dict.pkl")
+    torch.save(pred_nn_module.state_dict(), "../models/electricity/pretrain_pred_nn_module_state_dict.pkl")
+# -
+
+# ### Final training
+
 # +
 kf = KalmanFilter(
     processes=[
         LocalLevel('level').add_measure('meter_reading_clean_pp'),
+        
         LocalLevel('local_level', decay=(.90,.999)).add_measure('meter_reading_clean_pp'),
+        
         FourierSeasonDynamic(
             id='hour_in_day', 
             seasonal_period=24, 
             K=2, 
             decay=(.90,.999), 
             **season_config
-        ).add_measure('meter_reading_clean_pp'), 
-        NN(
-            id='predictors', 
-            input_dim=len(predictors), 
-            state_dim=pred_nn_module.sequential[-1].out_features,
-            nn_module=pred_nn_module,
-            add_module_params_to_process=False
-        ).add_measure('meter_reading_clean_pp')
+        ).add_measure('meter_reading_clean_pp'),
+        
+        nn_process
     ],
      measures=['meter_reading_clean_pp']
     )
@@ -169,15 +257,19 @@ kf.optimizer = torch.optim.Adam(kf.parameters(), lr=.02)
 kf.optimizer.add_param_group({'params' : pred_nn_module.parameters(), 'lr' : .005})
 
 # +
-rs = np.random.RandomState(2019-12-12)
+try:
+    kf.load_state_dict(torch.load("../models/electricity/kf_state_dict.pkl"))
+    pred_nn_module.load_state_dict(torch.load("../models/electricity/pretrain_pred_nn_module_state_dict.pkl"))
+    NUM_EPOCHS_TRAIN_KF = 0
+except FileNotFoundError:
+    print("Training KF...")
 
 kf.df_loss = []
-for epoch in range(30):
+for epoch in range(NUM_EPOCHS_TRAIN_KF):
     for i, (tb, vb) in enumerate(zip_longest(electric_dl_train, electric_dl_val)):
         for nm, batch in {'train' : tb, 'val' : vb}.items():
             if not batch:
                 continue
-            nm = 'val' if is_val else 'train'
             with torch.set_grad_enabled(nm == 'train'):
                 loss = forward_backward(
                     model=kf, 
@@ -217,3 +309,48 @@ for batch in electric_dl_val:
       drop(columns=['measure'])
     df_val_forecast.append(df)
 df_val_forecast = pd.concat(df_val_forecast)
+
+# +
+df_example = df_val_forecast.\
+            query("building_id == building_id.sample().item() & timestamp.dt.month >= 5").\
+              merge(df_electric_trainval, how='left')
+
+print(
+    ggplot(df_example, 
+           aes(x='timestamp')) +
+    geom_line(aes(y='predicted_mean'), color='red', alpha=.50, size=1) +
+    geom_ribbon(aes(ymin='predicted_mean - predicted_std', ymax='predicted_mean + predicted_std'), alpha=.25) +
+    geom_line(aes(y='meter_reading_clean_pp')) +
+    geom_vline(xintercept=np.datetime64('2016-06-01')) +
+    theme(figure_size=(12,5)) +
+    ggtitle(str(df_example['building_id'].unique().item()))
+)
+
+print(
+    ggplot(df_example.assign(train=lambda df: df['timestamp'] < '2016-06-01'), 
+           aes(x='timestamp.dt.hour')) +
+    stat_summary(aes(y='predicted_mean'), color='red', alpha=.50, size=1) +
+    stat_summary(aes(y='meter_reading_clean_pp')) +
+    theme(figure_size=(12,5)) +
+    facet_wrap("~train") +
+    ggtitle(str(df_example['building_id'].unique().item()))
+)
+# + {}
+df_val_err = df_val_forecast.\
+              merge(df_electric_trainval, how='left').\
+    assign(resid= lambda df: df['predicted_mean'] - df['meter_reading_clean_pp'], # TODO: inverse-transform
+           mse = lambda df: df['resid'] ** 2,
+           month = lambda df: df['timestamp'].dt.month).\
+    groupby(['building_id','month'])\
+    ['mse','resid'].mean().\
+    reset_index()
+
+print(
+    ggplot(df_val_err, aes(x='month')) + 
+    stat_summary(aes(y='resid'), fun_data='mean_cl_boot', color='red') +
+    stat_summary(aes(y='mse'), fun_data='mean_cl_boot', color='blue') +
+    geom_hline(yintercept=(0.0,-.2,-.4)) 
+)
+# -
+
+

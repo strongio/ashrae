@@ -166,7 +166,7 @@ def prepare_dataset(df_readings: pd.DataFrame, reading_colname: str) -> TimeSeri
         fillna({c: 0.0 for c in (meta_preds + tv_preds)})
 
     # filter out dates before the building started:
-    _min_dts = df_joined.query(f"~{reading_colname}.isnull()").groupby('building_id')['timestamp'].min().to_dict()
+    _min_dts = df_joined.loc[~df_joined[reading_colname].isnull(),:].groupby('building_id')['timestamp'].min().to_dict()
     df_joined = df_joined. \
         assign(_min_dt=lambda df: df['building_id'].map(_min_dts)). \
         query("timestamp >= _min_dt")

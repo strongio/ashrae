@@ -13,8 +13,6 @@
 #     name: python3
 # ---
 
-
-
 # +
 from ashrae import DATA_DIR, PROJECT_ROOT
 from ashrae.nn import MultiSeriesStateNN, TimeSeriesStateNN
@@ -47,6 +45,12 @@ np.random.seed(2019-12-12)
 rs = np.random.RandomState(2019-12-12)
 # -
 
+try:
+    df_train_clean = pd.read_feather(os.path.join(PROJECT_ROOT, "clean-data", "df_train_clean.feather"))
+except Exception:
+    from clean_data import df_train_clean
+df_meta = pd.read_csv(os.path.join(DATA_DIR, "building_metadata.csv"))
+
 from prepare_dataset import prepare_dataset, season_config, colname_config, primary_uses, holidays
 
 
@@ -63,9 +67,6 @@ NUM_EPOCHS_TRAIN_KF = os.environ.get("NUM_EPOCHS_TRAIN_KF", 30)
 
 MODEL_DIR = os.path.join(PROJECT_ROOT, "models", "electricity")
 os.makedirs(MODEL_DIR, exist_ok=True)
-
-df_meta = pd.read_csv(os.path.join(DATA_DIR, "building_metadata.csv"))
-df_train_clean = pd.read_feather(os.path.join(PROJECT_ROOT, "clean-data", "df_train_clean.feather"))
 
 # ## Dataset
 

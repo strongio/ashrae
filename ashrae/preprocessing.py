@@ -12,7 +12,7 @@ class DataFrameScaler(TransformerMixin, BaseEstimator):
         self.value_colnames = tuple(value_colnames)
         self._fitted = None
 
-    def fit(self, X: pd.DataFrame, y: None = None, **kwargs) -> pd.DataFrame:
+    def fit(self, X: pd.DataFrame, y: None = None, **kwargs) -> 'DataFrameScaler':
         group_colname = self.group_colname or '_dummy'
         self._fitted = X.assign(_dummy=1).groupby([group_colname])[self.value_colnames].agg(
             ['mean', 'std']).reset_index()
@@ -22,7 +22,7 @@ class DataFrameScaler(TransformerMixin, BaseEstimator):
         ]
         return self
 
-    def transform(self, X: pd.DataFrame, keep_cols: tuple = (), **kwargs) -> pd.DataFrame:
+    def _merge(self, X: pd.DataFrame, keep_cols: tuple) -> pd.DataFrame:
         group_colname = self.group_colname or '_dummy'
         if keep_cols == 'all':
             keep_cols = list(set(X.columns) - {group_colname} - set(self.value_colnames))
@@ -30,6 +30,10 @@ class DataFrameScaler(TransformerMixin, BaseEstimator):
                   assign(_dummy=1). \
                   loc[:, (group_colname,) + tuple(keep_cols) + self.value_colnames]. \
             merge(self._fitted, on=group_colname, how='left')
+        return out
+
+    def transform(self, X: pd.DataFrame, keep_cols: tuple = (), **kwargs) -> pd.DataFrame:
+        out = self._merge(X=X, keep_cols=keep_cols)
         for value_colname in self.value_colnames:
             if self.center:
                 out[value_colname] -= out[f"{value_colname}__mean"]
@@ -37,6 +41,20 @@ class DataFrameScaler(TransformerMixin, BaseEstimator):
             if self.scale:
                 out[value_colname] /= out[f"{value_colname}__std"]
             out.pop(f"{value_colname}__std")
+        if '_dummy' in out.columns:
+            out.pop('_dummy')
+        return out
+
+    def inverse_transform(self, X: pd.DataFrame, keep_cols: tuple = (), **kwargs) -> pd.DataFrame:
+        out = self._merge(X=X, keep_cols=keep_cols)
+        for value_colname in self.value_colnames:
+            if self.scale:
+                out[value_colname] *= out[f"{value_colname}__std"]
+            out.pop(f"{value_colname}__std")
+            if self.center:
+                out[value_colname] += out[f"{value_colname}__mean"]
+            out.pop(f"{value_colname}__mean")
+
         if '_dummy' in out.columns:
             out.pop('_dummy')
         return out

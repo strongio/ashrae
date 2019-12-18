@@ -17,7 +17,6 @@
 import pandas as pd
 import numpy as np
 
-from torch_kalman.utils.data import TimeSeriesDataset
 from torch_kalman.utils.features import fourier_model_mat
 
 from pandas.tseries.holiday import USFederalHolidayCalendar as calendar
@@ -26,6 +25,7 @@ import os
 # -
 from ashrae import DATA_DIR
 from ashrae.preprocessing import DataFrameScaler, date_expander
+from ashrae.training import DataLoaderFactory
 
 season_config = {
     'season_start': pd.Timestamp('2007-01-01'),  # arbitrary monday at midnight
@@ -38,10 +38,8 @@ colname_config = {
 
 # ## Weather Data
 
-print("Processing weather data...")
-
 # +
-df_weather_train = pd.read_csv(os.path.join(DATA_DIR, "weather_train.csv"), parse_dates=['timestamp'])
+df_weather_trainval = pd.read_csv(os.path.join(DATA_DIR, "weather_train.csv"), parse_dates=['timestamp'])
 
 
 def get_rel_humidity(air_temp: np.ndarray, dew_temp: np.ndarray) -> np.ndarray:
@@ -50,30 +48,26 @@ def get_rel_humidity(air_temp: np.ndarray, dew_temp: np.ndarray) -> np.ndarray:
     return numer / denom
 
 
-df_weather_train['relative_humidity'] = \
-    get_rel_humidity(df_weather_train['air_temperature'], df_weather_train.pop('dew_temperature'))
-df_weather_train['is_raining'] = (df_weather_train['precip_depth_1_hr'].fillna(0.0) > 0.0).astype('int')
+df_weather_trainval['relative_humidity'] = \
+    get_rel_humidity(df_weather_trainval['air_temperature'], df_weather_trainval.pop('dew_temperature'))
+df_weather_trainval['is_raining'] = (df_weather_trainval['precip_depth_1_hr'].fillna(0.0) > 0.0).astype('int')
 
 # +
 weather_preds = [
     'air_temperature', 'relative_humidity', 'is_raining', 'sea_level_pressure', 'wind_speed', 'cloud_coverage'
 ]
-weather_scaler = DataFrameScaler(value_colnames=weather_preds).fit(df_weather_train)
-df_weather_train_pp = weather_scaler.transform(df_weather_train, keep_cols=('site_id','timestamp'))
-df_weather_train_pp['air_temperature_hi'] =\
-    df_weather_train_pp['air_temperature'].where(df_weather_train_pp['air_temperature'] > 0, 0.0)
-df_weather_train_pp['air_temperature_lo'] =\
-    df_weather_train_pp['air_temperature'].where(df_weather_train_pp.pop('air_temperature') <= 0, 0.0)
+weather_scaler = DataFrameScaler(value_colnames=weather_preds).fit(df_weather_trainval)
+df_weather_trainval_pp = weather_scaler.transform(df_weather_trainval, keep_cols=('site_id','timestamp'))
+df_weather_trainval_pp['air_temperature_hi'] =\
+    df_weather_trainval_pp['air_temperature'].where(df_weather_trainval_pp['air_temperature'] > 0, 0.0)
+df_weather_trainval_pp['air_temperature_lo'] =\
+    df_weather_trainval_pp['air_temperature'].where(df_weather_trainval_pp.pop('air_temperature') <= 0, 0.0)
 
 weather_preds.remove('air_temperature')
 weather_preds.extend(['air_temperature_hi','air_temperature_lo'])
 # -
 
-print("... finished.")
-
 # ## External Predictors 
-
-print("Processing external predictors...")
 
 # +
 df_meta_predictors = pd.read_csv(os.path.join(DATA_DIR, "building_metadata.csv")).\
@@ -95,7 +89,7 @@ primary_uses = df_meta_predictors['primary_use'].unique()
 # -
 
 df_holidays = calendar().\
-    holidays(start=df_weather_train_pp['timestamp'].min(), end=pd.Timestamp.today(), return_name=True).\
+    holidays(start=df_weather_trainval_pp['timestamp'].min(), end=pd.Timestamp.today(), return_name=True).\
     reset_index().\
     rename(columns={0 : 'holiday', 'index' : 'start'}).\
     assign(end= lambda df: df['start'] + pd.Timedelta('1D'),
@@ -111,7 +105,7 @@ df_holidays['holiday'].cat.add_categories(['None'], inplace=True)
 df_holidays['holiday'].cat.reorder_categories(new_categories=['None'] + holidays, inplace=True)
 
 # +
-df_tv_predictors_train = df_weather_train_pp.\
+df_tv_predictors_trainval = df_weather_trainval_pp.\
     merge(df_holidays, how='left', on=['timestamp']).\
     assign(
         is_weekday=lambda df: (df['timestamp'].dt.weekday < 5).astype('int'),
@@ -119,17 +113,17 @@ df_tv_predictors_train = df_weather_train_pp.\
     ).\
     reset_index(drop=True)
 
-# df_tv_predictors_train['hour_in_day'] = df_tv_predictors_train['timestamp'].dt.hour
-df_tv_predictors_train = pd.concat([
-    df_tv_predictors_train, 
-    pd.get_dummies(df_tv_predictors_train['timestamp'].dt.hour, prefix='hour', drop_first=True)
+# df_tv_predictors_trainval['hour_in_day'] = df_tv_predictors_trainval['timestamp'].dt.hour
+df_tv_predictors_trainval = pd.concat([
+    df_tv_predictors_trainval, 
+    pd.get_dummies(df_tv_predictors_trainval['timestamp'].dt.hour, prefix='hour', drop_first=True)
 ], 
     axis=1)
 
-df_tv_predictors_train = pd.concat([
-    df_tv_predictors_train, 
+df_tv_predictors_trainval = pd.concat([
+    df_tv_predictors_trainval, 
     fourier_model_mat(
-        dt=df_tv_predictors_train['timestamp'], 
+        dt=df_tv_predictors_trainval['timestamp'], 
         K=3,
         period='daily',
         start_dt=season_config['season_start'].to_datetime64(),
@@ -139,10 +133,10 @@ df_tv_predictors_train = pd.concat([
     axis=1
 )
 
-df_tv_predictors_train = pd.concat([
-    df_tv_predictors_train, 
+df_tv_predictors_trainval = pd.concat([
+    df_tv_predictors_trainval, 
     fourier_model_mat(
-        dt=df_tv_predictors_train['timestamp'], 
+        dt=df_tv_predictors_trainval['timestamp'], 
         K=4,
         period='yearly',
         start_dt=season_config['season_start'].to_datetime64(),
@@ -152,31 +146,12 @@ df_tv_predictors_train = pd.concat([
     axis=1
 )
 
-tv_preds = [c for c in df_tv_predictors_train.columns if c not in ['building_id','timestamp','site_id']]
+tv_preds = [c for c in df_tv_predictors_trainval.columns if c not in ['building_id', 'timestamp', 'site_id']]
 # -
 
-print("...finished")
-
-
-def prepare_dataset(df_readings: pd.DataFrame, reading_colname: str) -> TimeSeriesDataset:
-    # join:
-    df_joined = df_meta_predictors. \
-        merge(df_tv_predictors_train, on=['site_id'], how='inner'). \
-        merge(df_readings, on=['building_id', 'timestamp'], how='left'). \
-        fillna({c: 0.0 for c in (meta_preds + tv_preds)})
-
-    # filter out dates before the building started:
-    _min_dts = df_joined.loc[~df_joined[reading_colname].isnull(),:].groupby('building_id')['timestamp'].min().to_dict()
-    df_joined = df_joined. \
-        assign(_min_dt=lambda df: df['building_id'].map(_min_dts)). \
-        query("timestamp >= _min_dt")
-
-    # create dataset:
-    dataset = TimeSeriesDataset.from_dataframe(
-        df_joined,
-        **colname_config,
-        measure_colnames=[reading_colname] + tv_preds + meta_preds,
-        dt_unit='h'
-    )
-    # split into separate tensors for readings, preds:
-    return dataset.split_measures(slice(1), slice(1, None))
+dataloader_factory = DataLoaderFactory(
+    df_meta_preds=df_meta_predictors,
+    df_tv_preds=df_tv_predictors_trainval,
+    predictors=tv_preds + meta_preds,
+    **colname_config
+)

@@ -1,7 +1,51 @@
 import numpy as np
 import torch
 from torch_kalman.kalman_filter import KalmanFilter
-from torch_kalman.utils.data import TimeSeriesDataset
+from torch_kalman.utils.data import TimeSeriesDataset, TimeSeriesDataLoader
+
+import pandas as pd
+
+
+class DataLoaderFactory:
+    def __init__(self,
+                 df_meta_preds: pd.DataFrame,
+                 df_tv_preds: pd.DataFrame,
+                 predictors: list,
+                 group_colname: str = 'building_id',
+                 time_colname: str = 'timestamp'
+                 ):
+        self.df_meta_preds = df_meta_preds
+        self.df_tv_preds = df_tv_preds
+        self.predictors = list(predictors)
+        assert group_colname == 'building_id'
+        self.colnames = {'group_colname': group_colname, 'time_colname': time_colname}
+
+    def __call__(self, df_readings: pd.DataFrame, reading_colname: str, **kwargs) -> 'TimeSeriesDataLoader':
+        buildings = df_readings['building_id'].unique()
+        df_meta_preds = self.df_meta_preds.loc[self.df_meta_preds['building_id'].isin(buildings), :]
+
+        # join:
+        df_joined = df_meta_preds. \
+            merge(self.df_tv_preds, on=['site_id'], how='inner'). \
+            merge(df_readings, on=['building_id', 'timestamp'], how='left'). \
+            fillna({c: 0.0 for c in self.predictors})
+
+        # filter out dates before the building started:
+        _nonnull_rows = ~df_joined[reading_colname].isnull()
+        _min_dts = df_joined.loc[_nonnull_rows, :].groupby('building_id')['timestamp'].min().to_dict()
+        df_joined = df_joined. \
+            assign(_min_dt=lambda df: df['building_id'].map(_min_dts)). \
+            query("timestamp >= _min_dt")
+
+        # create dataloader:
+        dataloader = TimeSeriesDataLoader.from_dataframe(
+            df_joined,
+            **self.colnames,
+            measure_colnames=[reading_colname] + self.predictors,
+            dt_unit='h',
+            **kwargs
+        )
+        return dataloader
 
 
 def remove_random_dates(batch: 'TimeSeriesDataset',

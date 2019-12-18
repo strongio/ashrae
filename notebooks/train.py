@@ -49,9 +49,10 @@ try:
     df_train_clean = pd.read_feather(os.path.join(PROJECT_ROOT, "clean-data", "df_train_clean.feather"))
 except Exception:
     from clean_data import df_train_clean
-df_meta = pd.read_csv(os.path.join(DATA_DIR, "building_metadata.csv"))
 
-from prepare_dataset import prepare_dataset, season_config, colname_config, primary_uses, holidays
+from prepare_dataset import (
+    season_config, colname_config, primary_uses, holidays, dataloader_factory
+)
 
 def loss_plot(df_loss: pd.DataFrame):
     return (
@@ -60,65 +61,71 @@ def loss_plot(df_loss: pd.DataFrame):
             theme_bw() + theme(figure_size=(10, 4))
     )
 
+METER_TYPE = os.environ.get("METER_TYPE", "electricity")
 NUM_EPOCHS_PRETRAIN_NN = os.environ.get("NUM_EPOCHS_PRETRAIN_NN", 200)
-NUM_EPOCHS_PRETRAIN_KF = os.environ.get("NUM_EPOCHS_PRETRAIN_KF", 20) # <---------
 NUM_EPOCHS_TRAIN_KF = os.environ.get("NUM_EPOCHS_TRAIN_KF", 30)
 
-MODEL_DIR = os.path.join(PROJECT_ROOT, "models", "electricity")
+MODEL_DIR = os.path.join(PROJECT_ROOT, "models", METER_TYPE)
 os.makedirs(MODEL_DIR, exist_ok=True)
 # -
 
 # ## Dataset
 
 # +
-print("Preparing electricity dataset...")
+print(f"Preparing {METER_TYPE} dataset...")
 
-df_electric_trainval = df_train_clean.\
-    query("meter == 'electricity'").\
+df_mt_trainval = df_train_clean.\
+    loc[df_train_clean['meter'] == METER_TYPE,:].\
     loc[:,['building_id', 'timestamp', 'meter_reading', 'meter_reading_clean']].\
     reset_index(drop=True).\
-    assign(meter_reading_clean_pp = lambda df: np.log1p(df['meter_reading_clean']))
+    assign(meter_reading_clean_pp=lambda df: np.log1p(df['meter_reading_clean']))
 
-electric_scaler = DataFrameScaler(
+mt_scaler = DataFrameScaler(
         value_colnames=['meter_reading_clean_pp'],
         group_colname='building_id',
         center=True,
         scale=True
-).fit(df_electric_trainval)
+).fit(df_mt_trainval)
 
-df_electric_trainval = electric_scaler.transform(df_electric_trainval, keep_cols='all')
+df_mt_trainval = mt_scaler.transform(df_mt_trainval, keep_cols='all')
 
-train_ids = df_electric_trainval['building_id'].drop_duplicates().sample(frac=.75).tolist()
-val_ids = [id for id in df_electric_trainval['building_id'].drop_duplicates() if id not in train_ids]
+train_ids = df_mt_trainval['building_id'].drop_duplicates().sample(frac=.75).tolist()
+val_ids = [id for id in df_mt_trainval['building_id'].drop_duplicates() if id not in train_ids]
 print(f"Training {len(train_ids)}, validation {len(val_ids)}")
 
-electric_dataset = prepare_dataset(df_electric_trainval, 'meter_reading_clean_pp')
-electric_dataset.tensors[1][torch.isnan(electric_dataset.tensors[1])] = 0.0
-electric_dl_train = DataLoader(electric_dataset.get_groups(train_ids), batch_size=50, collate_fn=TimeSeriesDataset.collate)
-electric_dl_val = DataLoader(electric_dataset.get_groups(val_ids), batch_size=50, collate_fn=TimeSeriesDataset.collate)
+dl_train = dataloader_factory(
+    df_readings=df_mt_trainval.loc[df_mt_trainval['building_id'].isin(train_ids)],
+    batch_size=50,
+    reading_colname='meter_reading_clean_pp'
+)
+dl_val = dataloader_factory(
+    df_readings=df_mt_trainval.loc[df_mt_trainval['building_id'].isin(val_ids)],
+    batch_size=100,
+    reading_colname='meter_reading_clean_pp'
+)
 
 print("...finished")
 # -
 
 # ## NN Module
 
-predictors = list(electric_dataset.measures[1])
-print(predictors)
+print(dataloader_factory.predictors)
 pretrain_nn_module = MultiSeriesStateNN(
-    num_series=df_meta['building_id'].max(),
-    num_predictors=len(predictors),
+    num_series=dataloader_factory.df_meta_preds['building_id'].max(),
+    num_predictors=len(dataloader_factory.predictors),
     hidden=(50,25,15),
     embed_inputs={
-        predictors.index('primary_use') : {
+        dataloader_factory.predictors.index('primary_use') : {
             'num_embeddings' : len(primary_uses), 
             'embedding_dim' : 3
         },
-        predictors.index('holiday') : {
+        dataloader_factory.predictors.index('holiday') : {
             'num_embeddings' : len(holidays) + 1, 
             'embedding_dim' : 2
         }
     }
 )
+pretrain_nn_module
 
 # ### Pretraining
 
@@ -133,12 +140,14 @@ except FileNotFoundError:
     print(f"Pre-training NN-module for {NUM_EPOCHS_PRETRAIN_NN} epochs...")
     
 for epoch in range(NUM_EPOCHS_PRETRAIN_NN):
-    for i, (tb, vb) in enumerate(zip_longest(electric_dl_train, electric_dl_val)):
+    for i, (tb, vb) in enumerate(zip_longest(dl_train, dl_val)):
         for nm, batch in {'train' : tb, 'val' : vb}.items():
             if not batch:
                 continue
-                
+            batch = batch.split_measures(slice(1), slice(1, None))
+            
             y, X = batch.tensors
+            X[torch.isnan(X)] = 0.0
             y = y.squeeze(-1) # batches support multivariate, but we want to squeeze the singleton dim
             with torch.set_grad_enabled(nm == 'train'):
                 prediction = pretrain_nn_module(X, series_idx=batch.group_names if nm == 'train' else None)
@@ -157,8 +166,9 @@ for epoch in range(NUM_EPOCHS_PRETRAIN_NN):
     torch.save(pretrain_nn_module.state_dict(), f"{MODEL_DIR}/pretrain_nn_module_state_dict.pkl")
 # -
 
-batch = next(iter(electric_dl_train))
+batch = next(iter(dl_train)).split_measures(slice(1), slice(1, None))
 _, X = batch.tensors
+X[torch.isnan(X)] = 0.0
 df_example = batch.tensor_to_dataframe(
     tensor=pretrain_nn_module(X, series_idx=batch.group_names).unsqueeze(-1),
     times=batch.times(),
@@ -166,7 +176,7 @@ df_example = batch.tensor_to_dataframe(
     group_colname='building_id',
     time_colname='timestamp',
     measures=['prediction']
-).query("building_id == building_id.sample().item()").merge(df_electric_trainval)
+).query("building_id == building_id.sample().item()").merge(df_mt_trainval)
 print(
     ggplot(df_example.query("timestamp.dt.month > 6"), aes(x='timestamp')) +
     geom_line(aes(y='meter_reading_clean_pp')) +
@@ -187,64 +197,6 @@ assert isinstance(pred_nn_module.sequential[-1], torch.nn.Tanh)
 del pred_nn_module.sequential[-1]
 
 pred_nn_module
-# -
-
-# ### Pretraining
-
-# +
-nn_process = NN(
-                id='predictors', 
-                input_dim=len(predictors), 
-                state_dim=pred_nn_module.sequential[-1].out_features,
-                nn_module=pred_nn_module,
-                add_module_params_to_process=False
-            ).add_measure('meter_reading_clean_pp')
-
-kf_nn_only = KalmanFilter(
-     processes=[nn_process],
-     measures=['meter_reading_clean_pp']
-    )
-
-# better init:
-kf_nn_only.design.process_covariance.set(kf_nn_only.design.process_covariance.create().data / 100.)
-
-# optimizer:
-kf_nn_only.optimizer = torch.optim.Adam(kf_nn_only.parameters(), lr=.01)
-kf_nn_only.optimizer.add_param_group({'params' : pred_nn_module.parameters(), 'lr' : .005})
-
-# +
-try:
-    kf_nn_only.load_state_dict(torch.load(f"{MODEL_DIR}/pretrain_kf_state_dict.pkl"))
-    pred_nn_module.load_state_dict(torch.load(f"{MODEL_DIR}/pretrain_pred_nn_module_state_dict.pkl"))
-    NUM_EPOCHS_PRETRAIN_KF = 0
-except FileNotFoundError:
-    print(f"Pre-training KF NN-process for {NUM_EPOCHS_PRETRAIN_KF} epochs...")
-
-kf_nn_only.df_loss = []
-for epoch in range(NUM_EPOCHS_PRETRAIN_KF):
-    for i, (tb, vb) in enumerate(zip_longest(electric_dl_train, electric_dl_val)):
-        for nm, batch in {'train' : tb, 'val' : vb}.items():
-            if not batch:
-                continue
-            with torch.set_grad_enabled(nm == 'train'):
-                loss = forward_backward(
-                    model=kf_nn_only,
-                    batch=batch, 
-                    delete_interval='60D', 
-                    random_state=rs if nm == 'val' else None
-                )
-            if nm == 'train':
-                kf_nn_only.optimizer.zero_grad()
-            kf_nn_only.df_loss.append({'value' : loss.item(), 'dataset' : nm, 'epoch' : epoch})
-            print(f"batch {i}, {nm} loss {loss.item():.3f}")
-    clear_output(wait=True)
-    print(loss_plot(kf_nn_only.df_loss) + ggtitle(f"Epoch {epoch}"))
-    
-    torch.save(kf_nn_only.state_dict(), f"{MODEL_DIR}/pretrain_kf_state_dict.pkl")
-    torch.save(pred_nn_module.state_dict(), f"{MODEL_DIR}/pretrain_pred_nn_module_state_dict.pkl")
-# -
-
-# ### Final training
 
 # +
 kf = KalmanFilter(
@@ -261,7 +213,13 @@ kf = KalmanFilter(
             **season_config
         ).add_measure('meter_reading_clean_pp'),
         
-        nn_process
+        NN(
+            id='predictors', 
+            input_dim=len(dataloader_factory.predictors), 
+            state_dim=pred_nn_module.sequential[-1].out_features,
+            nn_module=pred_nn_module,
+            add_module_params_to_process=False
+        ).add_measure('meter_reading_clean_pp')
     ],
      measures=['meter_reading_clean_pp']
     )
@@ -283,10 +241,12 @@ except FileNotFoundError:
 
 kf.df_loss = []
 for epoch in range(NUM_EPOCHS_TRAIN_KF):
-    for i, (tb, vb) in enumerate(zip_longest(electric_dl_train, electric_dl_val)):
+    for i, (tb, vb) in enumerate(zip_longest(dl_train, dl_val)):
         for nm, batch in {'train' : tb, 'val' : vb}.items():
             if not batch:
                 continue
+            batch = batch.split_measures(slice(1), slice(1, None))
+            batch.tensors[1][torch.isnan(batch.tensors[1])] = 0.0 
             with torch.set_grad_enabled(nm == 'train'):
                 loss = forward_backward(
                     model=kf, 
@@ -311,9 +271,9 @@ for epoch in range(NUM_EPOCHS_TRAIN_KF):
 val_forecast_dt = np.datetime64('2016-06-01')
 
 df_val_forecast = []
-for batch in electric_dl_val:
-    if 1191 not in batch.group_names:
-        continue
+for batch in dl_val:
+    batch = batch.split_measures(slice(1), slice(1, None))
+    batch.tensors[1][torch.isnan(batch.tensors[1])] = 0.0 
     with torch.no_grad():
         readings, predictors = (t.clone() for t in batch.tensors)
         readings[np.where(batch.times() > val_forecast_dt)] = float('nan')
@@ -333,7 +293,7 @@ df_val_forecast = pd.concat(df_val_forecast)
 # +
 df_example = df_val_forecast.\
             query("(building_id == 1191) & (timestamp.dt.month >= 2)").\
-              merge(df_electric_trainval, how='left')
+              merge(df_mt_trainval, how='left')
 
 print(
     ggplot(df_example, 
@@ -355,9 +315,10 @@ print(
     facet_wrap("~train") +
     ggtitle(str(df_example['building_id'].unique().item()))
 )
-# + {}
+
+# +
 df_val_err = df_val_forecast.\
-              merge(df_electric_trainval, how='left').\
+              merge(df_mt_trainval, how='left').\
     assign(resid= lambda df: df['predicted_mean'] - df['meter_reading_clean_pp'], # TODO: inverse-transform
            mse = lambda df: df['resid'] ** 2,
            month = lambda df: df['timestamp'].dt.month).\
@@ -369,8 +330,9 @@ print(
     ggplot(df_val_err, aes(x='month')) + 
     stat_summary(aes(y='resid'), fun_data='mean_cl_boot', color='red') +
     stat_summary(aes(y='mse'), fun_data='mean_cl_boot', color='blue') +
-    geom_hline(yintercept=(0.0,-.2,-.4)) 
+    geom_hline(yintercept=0.0) 
 )
 # -
+
 
 

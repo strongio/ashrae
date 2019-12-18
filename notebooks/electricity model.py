@@ -148,10 +148,11 @@ for epoch in range(NUM_EPOCHS_PRETRAIN_NN):
                 loss.backward()
                 pretrain_nn_module.optimizer.step()
                 pretrain_nn_module.optimizer.zero_grad()
-            
-            clear_output(wait=True)
             pretrain_nn_module.df_loss.append({'value' : loss.item(), 'dataset' : nm, 'epoch' : epoch})
-    print(loss_plot(pretrain_nn_module.df_loss) + ggtitle(f"Epoch {epoch}, batch {i}, {nm} loss {loss.item():.2f}"))
+            print(f"batch {i}, {nm} loss {loss.item():.3f}")
+            
+    clear_output(wait=True)        
+    print(loss_plot(pretrain_nn_module.df_loss) + ggtitle(f"Epoch {epoch}"))
         
     torch.save(pretrain_nn_module.state_dict(), f"{MODEL_DIR}/pretrain_nn_module_state_dict.pkl")
 # -
@@ -235,8 +236,9 @@ for epoch in range(NUM_EPOCHS_PRETRAIN_KF):
             if nm == 'train':
                 kf_nn_only.optimizer.zero_grad()
             kf_nn_only.df_loss.append({'value' : loss.item(), 'dataset' : nm, 'epoch' : epoch})
-            clear_output(wait=True)
-        print(loss_plot(kf_nn_only.df_loss) + ggtitle(f"Epoch {epoch}, batch {i}, {nm} loss {loss.item():.2f}"))
+            print(f"batch {i}, {nm} loss {loss.item():.3f}")
+    clear_output(wait=True)
+    print(loss_plot(kf_nn_only.df_loss) + ggtitle(f"Epoch {epoch}"))
     
     torch.save(kf_nn_only.state_dict(), f"{MODEL_DIR}/pretrain_kf_state_dict.pkl")
     torch.save(pred_nn_module.state_dict(), f"{MODEL_DIR}/pretrain_pred_nn_module_state_dict.pkl")
@@ -277,7 +279,7 @@ try:
     pred_nn_module.load_state_dict(torch.load(f"{MODEL_DIR}/pretrain_pred_nn_module_state_dict.pkl"))
     NUM_EPOCHS_TRAIN_KF = 0
 except FileNotFoundError:
-    print("Training KF...")
+    print(f"Training KF for {NUM_EPOCHS_TRAIN_KF} epochs...")
 
 kf.df_loss = []
 for epoch in range(NUM_EPOCHS_TRAIN_KF):
@@ -295,8 +297,9 @@ for epoch in range(NUM_EPOCHS_TRAIN_KF):
             if nm == 'train':
                 kf.optimizer.zero_grad()
             kf.df_loss.append({'value' : loss.item(), 'dataset' : nm, 'epoch' : epoch})
-            clear_output(wait=True)
-        print(loss_plot(kf.df_loss) + ggtitle(f"Epoch {epoch}, batch {i}, {nm} loss {loss.item():.2f}"))
+            print(f"{nm} loss {loss.item():.3f}")
+    clear_output(wait=True)
+    print(loss_plot(kf.df_loss) + ggtitle(f"Epoch {epoch}, batch {i}"))
     
     torch.save(kf.state_dict(), f"{MODEL_DIR}/kf_state_dict.pkl")
     torch.save(pred_nn_module.state_dict(), f"{MODEL_DIR}/pred_nn_module_state_dict.pkl")

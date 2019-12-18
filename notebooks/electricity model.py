@@ -43,8 +43,8 @@ from torch_kalman.utils.data import TimeSeriesDataset
 torch.manual_seed(2019-12-12)
 np.random.seed(2019-12-12)
 rs = np.random.RandomState(2019-12-12)
-# -
 
+# +
 try:
     df_train_clean = pd.read_feather(os.path.join(PROJECT_ROOT, "clean-data", "df_train_clean.feather"))
 except Exception:
@@ -52,7 +52,6 @@ except Exception:
 df_meta = pd.read_csv(os.path.join(DATA_DIR, "building_metadata.csv"))
 
 from prepare_dataset import prepare_dataset, season_config, colname_config, primary_uses, holidays
-
 
 def loss_plot(df_loss: pd.DataFrame):
     return (
@@ -62,11 +61,12 @@ def loss_plot(df_loss: pd.DataFrame):
     )
 
 NUM_EPOCHS_PRETRAIN_NN = os.environ.get("NUM_EPOCHS_PRETRAIN_NN", 200)
-NUM_EPOCHS_PRETRAIN_KF = os.environ.get("NUM_EPOCHS_PRETRAIN_KF", 20)
+NUM_EPOCHS_PRETRAIN_KF = os.environ.get("NUM_EPOCHS_PRETRAIN_KF", 20) # <---------
 NUM_EPOCHS_TRAIN_KF = os.environ.get("NUM_EPOCHS_TRAIN_KF", 30)
 
 MODEL_DIR = os.path.join(PROJECT_ROOT, "models", "electricity")
 os.makedirs(MODEL_DIR, exist_ok=True)
+# -
 
 # ## Dataset
 
@@ -107,7 +107,7 @@ print(predictors)
 pretrain_nn_module = MultiSeriesStateNN(
     num_series=df_meta['building_id'].max(),
     num_predictors=len(predictors),
-    hidden=(50,25),
+    hidden=(50,25,15),
     embed_inputs={
         predictors.index('primary_use') : {
             'num_embeddings' : len(primary_uses), 
@@ -130,7 +130,7 @@ try:
     pretrain_nn_module.load_state_dict(torch.load(f"{MODEL_DIR}/pretrain_nn_module_state_dict.pkl"))
     NUM_EPOCHS_PRETRAIN_NN = 0
 except FileNotFoundError:
-    print("Pre-training NN-module...")
+    print(f"Pre-training NN-module for {NUM_EPOCHS_PRETRAIN_NN} epochs...")
     
 for epoch in range(NUM_EPOCHS_PRETRAIN_NN):
     for i, (tb, vb) in enumerate(zip_longest(electric_dl_train, electric_dl_val)):
@@ -151,7 +151,7 @@ for epoch in range(NUM_EPOCHS_PRETRAIN_NN):
             
             clear_output(wait=True)
             pretrain_nn_module.df_loss.append({'value' : loss.item(), 'dataset' : nm, 'epoch' : epoch})
-            print(loss_plot(pretrain_nn_module.df_loss) + ggtitle(f"Epoch {epoch}, batch {i}, {nm} loss {loss.item():.2f}"))
+    print(loss_plot(pretrain_nn_module.df_loss) + ggtitle(f"Epoch {epoch}, batch {i}, {nm} loss {loss.item():.2f}"))
         
     torch.save(pretrain_nn_module.state_dict(), f"{MODEL_DIR}/pretrain_nn_module_state_dict.pkl")
 # -
@@ -217,7 +217,7 @@ try:
     pred_nn_module.load_state_dict(torch.load(f"{MODEL_DIR}/pretrain_pred_nn_module_state_dict.pkl"))
     NUM_EPOCHS_PRETRAIN_KF = 0
 except FileNotFoundError:
-    print("Pre-training KF NN-process...")
+    print(f"Pre-training KF NN-process for {NUM_EPOCHS_PRETRAIN_KF} epochs...")
 
 kf_nn_only.df_loss = []
 for epoch in range(NUM_EPOCHS_PRETRAIN_KF):
@@ -236,7 +236,7 @@ for epoch in range(NUM_EPOCHS_PRETRAIN_KF):
                 kf_nn_only.optimizer.zero_grad()
             kf_nn_only.df_loss.append({'value' : loss.item(), 'dataset' : nm, 'epoch' : epoch})
             clear_output(wait=True)
-            print(loss_plot(kf_nn_only.df_loss) + ggtitle(f"Epoch {epoch}, batch {i}, {nm} loss {loss.item():.2f}"))
+        print(loss_plot(kf_nn_only.df_loss) + ggtitle(f"Epoch {epoch}, batch {i}, {nm} loss {loss.item():.2f}"))
     
     torch.save(kf_nn_only.state_dict(), f"{MODEL_DIR}/pretrain_kf_state_dict.pkl")
     torch.save(pred_nn_module.state_dict(), f"{MODEL_DIR}/pretrain_pred_nn_module_state_dict.pkl")
@@ -296,7 +296,7 @@ for epoch in range(NUM_EPOCHS_TRAIN_KF):
                 kf.optimizer.zero_grad()
             kf.df_loss.append({'value' : loss.item(), 'dataset' : nm, 'epoch' : epoch})
             clear_output(wait=True)
-            print(loss_plot(kf.df_loss) + ggtitle(f"Epoch {epoch}, batch {i}, {nm} loss {loss.item():.2f}"))
+        print(loss_plot(kf.df_loss) + ggtitle(f"Epoch {epoch}, batch {i}, {nm} loss {loss.item():.2f}"))
     
     torch.save(kf.state_dict(), f"{MODEL_DIR}/kf_state_dict.pkl")
     torch.save(pred_nn_module.state_dict(), f"{MODEL_DIR}/pred_nn_module_state_dict.pkl")
@@ -329,7 +329,7 @@ df_val_forecast = pd.concat(df_val_forecast)
 
 # +
 df_example = df_val_forecast.\
-            query("(building_id == 1191) & (timestamp.dt.month >= 5)").\
+            query("(building_id == 1191) & (timestamp.dt.month >= 2)").\
               merge(df_electric_trainval, how='left')
 
 print(

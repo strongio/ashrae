@@ -45,6 +45,17 @@ np.random.seed(2019-12-12)
 rs = np.random.RandomState(2019-12-12)
 
 # +
+METER_TYPE = os.environ.get("METER_TYPE", "chilledwater")
+
+NN_PRETRAIN_NUM_EPOCHS = os.environ.get("NN_PRETRAIN_NUM_EPOCHS", 200 if METER_TYPE=='electricity' else 100 )
+NN_PRETRAIN_LR = os.environ.get("NN_PRETRAIN_LR", .002 if METER_TYPE=='electricity' else .001 )
+
+KF_TRAIN_NUM_EPOCHS = os.environ.get("KF_TRAIN_NUM_EPOCHS", 25 if METER_TYPE=='electricity' else 20 )
+KF_TRAIN_LR = os.environ.get("KF_TRAIN_LR", .01)
+
+MODEL_DIR = os.path.join(PROJECT_ROOT, "models", METER_TYPE)
+os.makedirs(MODEL_DIR, exist_ok=True)
+
 try:
     df_train_clean = pd.read_feather(os.path.join(PROJECT_ROOT, "clean-data", "df_train_clean.feather"))
 except Exception:
@@ -61,12 +72,7 @@ def loss_plot(df_loss: pd.DataFrame):
             theme_bw() + theme(figure_size=(10, 4))
     )
 
-METER_TYPE = os.environ.get("METER_TYPE", "electricity")
-NUM_EPOCHS_PRETRAIN_NN = os.environ.get("NUM_EPOCHS_PRETRAIN_NN", 200)
-NUM_EPOCHS_TRAIN_KF = os.environ.get("NUM_EPOCHS_TRAIN_KF", 30)
 
-MODEL_DIR = os.path.join(PROJECT_ROOT, "models", METER_TYPE)
-os.makedirs(MODEL_DIR, exist_ok=True)
 # -
 
 # ## Dataset
@@ -125,21 +131,24 @@ pretrain_nn_module = MultiSeriesStateNN(
         }
     }
 )
-pretrain_nn_module
+if METER_TYPE != 'electricity':
+    sd = torch.load(os.path.join(MODEL_DIR, "../electricity", "pretrain_nn_module_state_dict.pkl"))
+    pretrain_nn_module.load_state_dict(sd)
+    print("Will initialize pretrain_nn_module w/electricity weights.")
 
 # ### Pretraining
 
 # +
-pretrain_nn_module.optimizer = torch.optim.Adam(pretrain_nn_module.parameters(), lr=.002)
+pretrain_nn_module.optimizer = torch.optim.Adam(pretrain_nn_module.parameters(), lr=NN_PRETRAIN_LR)
 pretrain_nn_module.df_loss = []
 
 try:
     pretrain_nn_module.load_state_dict(torch.load(f"{MODEL_DIR}/pretrain_nn_module_state_dict.pkl"))
-    NUM_EPOCHS_PRETRAIN_NN = 0
+    NN_PRETRAIN_NUM_EPOCHS = 0
 except FileNotFoundError:
-    print(f"Pre-training NN-module for {NUM_EPOCHS_PRETRAIN_NN} epochs...")
+    print(f"Pre-training NN-module for {NN_PRETRAIN_NUM_EPOCHS} epochs...")
     
-for epoch in range(NUM_EPOCHS_PRETRAIN_NN):
+for epoch in range(NN_PRETRAIN_NUM_EPOCHS):
     for i, (tb, vb) in enumerate(zip_longest(dl_train, dl_val)):
         for nm, batch in {'train' : tb, 'val' : vb}.items():
             if not batch:
@@ -225,22 +234,27 @@ kf = KalmanFilter(
     )
 
 # better init:
-kf.design.process_covariance.set(kf.design.process_covariance.create().data / 100.)
+if METER_TYPE == 'electricity':
+    kf.design.process_covariance.set(kf.design.process_covariance.create().data / 100.)
+else:
+    pred_nn_module.load_state_dict(torch.load(os.path.join(MODEL_DIR, "../electricity", "pred_nn_module_state_dict.pkl")))
+    kf.load_state_dict(torch.load(os.path.join(MODEL_DIR, "../electricity", "kf_state_dict.pkl")))
+    print("Will initialize KF w/electricity weights.")
 
 # optimizer:
-kf.optimizer = torch.optim.Adam(kf.parameters(), lr=.02)
-kf.optimizer.add_param_group({'params' : pred_nn_module.parameters(), 'lr' : .005})
+kf.optimizer = torch.optim.Adam(kf.parameters(), lr=KF_TRAIN_LR)
+kf.optimizer.add_param_group({'params' : pred_nn_module.parameters(), 'lr' : KF_TRAIN_LR / 4})
 
 # +
 try:
     kf.load_state_dict(torch.load(f"{MODEL_DIR}/kf_state_dict.pkl"))
-    pred_nn_module.load_state_dict(torch.load(f"{MODEL_DIR}/pretrain_pred_nn_module_state_dict.pkl"))
-    NUM_EPOCHS_TRAIN_KF = 0
+    pred_nn_module.load_state_dict(torch.load(f"{MODEL_DIR}/pred_nn_module_state_dict.pkl"))
+    KF_TRAIN_NUM_EPOCHS = 0
 except FileNotFoundError:
-    print(f"Training KF for {NUM_EPOCHS_TRAIN_KF} epochs...")
+    print(f"Training KF for {KF_TRAIN_NUM_EPOCHS} epochs...")
 
 kf.df_loss = []
-for epoch in range(NUM_EPOCHS_TRAIN_KF):
+for epoch in range(KF_TRAIN_NUM_EPOCHS):
     for i, (tb, vb) in enumerate(zip_longest(dl_train, dl_val)):
         for nm, batch in {'train' : tb, 'val' : vb}.items():
             if not batch:

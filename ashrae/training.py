@@ -44,7 +44,7 @@ class DataLoaderFactory:
         # filter out dates before the building started:
         df_joined = df_joined. \
             merge(
-            df_joined.loc[~df_joined[reading_colname].isnull(), :]. \
+            df_joined.loc[~df_joined['meter_reading'].isnull(), :]. \
                 groupby('building_id'). \
                 agg(_min_dt=('timestamp', 'min')). \
                 reset_index()

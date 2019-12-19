@@ -2,49 +2,79 @@ from typing import Sequence
 
 import torch
 from ashrae.training import remove_random_dates
+from torch_kalman.covariance import PartialCovarianceFromLogCholesky
+from torch_kalman.design import Design
 from torch_kalman.kalman_filter import KalmanFilter
 from torch_kalman.state_belief import CensoredGaussian
 
 import numpy as np
 
 
+class DesignWithProbit(Design):
+    def __init__(self, processes: Sequence['Process'], measures: Sequence[str], probit_measures: Sequence[str]):
+        super().__init__(processes=processes, measures=measures)
+
+        self.probit_measures = probit_measures
+        assert set(probit_measures).issubset(self.measures)
+
+        # we fix the measure covariance for probit dimensions, since it's not identifiable:
+        self.measure_covariance = PartialCovarianceFromLogCholesky(
+            full_dim_names=self.measures,
+            partial_dim_names=self.probit_measures,
+            diag=1.0
+        )
+
+
 class Forecaster(KalmanFilter):
+    design_cls = DesignWithProbit
 
     def __init__(self,
                  measures: Sequence[str],
                  processes: Sequence['Process'],
                  probit_measures: Sequence[str] = (),
                  **kwargs):
-        super().__init__(measures=measures, processes=processes, **kwargs)
-        self.probit_measures = probit_measures
-        assert set(probit_measures).issubset(self.design.measures)
-        if self.probit_measures:
+        if probit_measures:
             self.family = CensoredGaussian
+        super().__init__(measures=measures, processes=processes, probit_measures=probit_measures, **kwargs)
 
     def forward(self,
                 input: torch.Tensor,
                 **kwargs) -> 'StateBeliefOverTime':
 
+        if issubclass(self.family, CensoredGaussian):
+            input = self._convert_input_for_censored(input)
+
+        return super().forward(input=input, **kwargs)
+
+    def _convert_input_for_censored(self, input: torch.Tensor) -> tuple:
         obs = []
         lower = []
         upper = []
         for i, measure in enumerate(self.design.measures):
             values = input[..., i]
-            if measure in self.probit_measures:
-                is_one = values.numpy().astype(bool)
+            if measure in self.design.probit_measures:
+                # all zeros:
                 obs.append(torch.zeros_like(values))
+
+                is_nan = np.where(np.isnan(values))
+
+                # if one, then uncensored on bottom:
+                is_one = values.numpy().astype(bool)
+                is_one[is_nan] = True
                 lower.append(torch.zeros_like(input[..., i]))
-                lower[-1][np.where(is_one)] = -np.inf
+                lower[-1][np.where(is_one)] = -float('inf')
+
+                # if zero, then uncensored on top:
+                is_zero = ~values.numpy().astype(bool)
+                is_zero[is_nan] = True
                 upper.append(torch.zeros_like(input[..., i]))
-                upper[-1][np.where(~is_one)] = np.inf
+                upper[-1][np.where(is_zero)] = float('inf')
             else:
                 obs.append(values)
                 lower.append(torch.full_like(values, -float('inf')))
                 upper.append(torch.full_like(values, float('inf')))
 
-        input = (torch.stack(obs, 2), torch.stack(lower, 2), torch.stack(upper, 2))
-
-        return super().forward(input=input, **kwargs)
+        return torch.stack(obs, 2), torch.stack(lower, 2), torch.stack(upper, 2)
 
     def forward_backward(self,
                          batch: 'TimeSeriesDataset',

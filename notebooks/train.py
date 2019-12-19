@@ -224,8 +224,8 @@ pred_nn_module
 drop_nn_module = TimeSeriesStateNN(
     **pred_nn_module._init_kwargs, 
     additional_layers=[
-        torch.nn.Linear(pred_nn_module.sequential[-1].out_features, 4, bias=False),
-        torch.nn.LogSoftmax()
+        torch.nn.Linear(pred_nn_module.sequential[-1].out_features, 1, bias=True),
+        torch.nn.Sigmoid()
     ]
 )
 
@@ -233,7 +233,7 @@ for param_name, from_param in pred_nn_module.named_parameters():
     to_param = dict(drop_nn_module.named_parameters())[param_name]
     to_param.data[:] = from_param.data[:]
 
-drop_nn_module.loss_fun = torch.nn.NLLLoss()
+drop_nn_module.loss_fun = torch.nn.BCELoss()
     
 drop_nn_module
 # -
@@ -253,7 +253,7 @@ dl_drops_val = dataloader_factory(
 )
 
 # +
-drop_nn_module.optimizer = torch.optim.Adam(drop_nn_module.parameters(), lr=NN_PRETRAIN_LR)
+drop_nn_module.optimizer = torch.optim.Adam(drop_nn_module.parameters(), lr=NN_PRETRAIN_LR * 2)
 drop_nn_module.df_loss = []
 
 try:
@@ -274,8 +274,7 @@ for epoch in range(NN_PRETRAIN_NUM_EPOCHS):
             y = y.squeeze(-1) # batches support multivariate, but we want to squeeze the singleton dim
             with torch.set_grad_enabled(nm == 'train'):
                 prediction = drop_nn_module(X)
-                loss = drop_nn_module.loss_fun(input=prediction[y == y].unsqueeze(-1),
-                                               target=y[y == y].unsqueeze(-1).to(torch.long))
+                loss = drop_nn_module.loss_fun(input=prediction[y == y].squeeze(-1), target=y[y == y])
                 
             if nm == 'train':
                 loss.backward()

@@ -15,7 +15,6 @@
 
 # + {"hideCode": false, "hidePrompt": false}
 from ashrae import DATA_DIR, PROJECT_ROOT
-from ashrae.preprocessing import clean_readings
 
 try:
     from plotnine import *
@@ -23,6 +22,7 @@ except ImportError:
     from ashrae.fake_plotnine import *
 
 import pandas as pd
+import numpy as np
 
 import os
 
@@ -78,8 +78,6 @@ print(
 
 # + {"hideCode": false, "hidePrompt": false, "cell_type": "markdown"}
 # ## Filter Buildings
-#
-# For some building X meters, it just doesn't make sense to try and use a complex model to predict -- their data is degenerate and should be predicted w/heuristics.
 
 # + {"hideCode": false, "hidePrompt": false}
 # jic cell re-run:
@@ -94,52 +92,83 @@ df_train = df_train.\
     merge(df_train)
 
 # + {"hideCode": false, "hidePrompt": false}
-# useful info for cleaning meters:
 df_train = df_train.\
-    sort_values(['timestamp']).\
-    reset_index(drop=True).\
+    sort_values(['building_id','timestamp']).\
+    reset_index(drop=True)
+
+df_train_clean = df_train.\
     assign(
-        near_zero = lambda df: df['meter_reading'] < 0.01,
-        building_row_id = lambda df: df.groupby('ts_id').cumcount() + 1,
-        near_zero_cumu = lambda df: df.groupby('ts_id')['near_zero'].cumsum() / df['building_row_id']
-    )
+        date= lambda df: df['timestamp'].dt.date,
+        near_zero= lambda df: df['meter_reading'] < 0.001,
+        nz_rolling=lambda df: df.groupby('ts_id')['near_zero'].rolling(24 * 7).mean().reset_index(level=0,drop=True)
+    ).\
+    query("nz_rolling < 0.80").\
+    reset_index(drop=True)
 
-# + {"hideCode": false, "hidePrompt": false}
-all_ts_ids = df_train['ts_id'].unique()
-print(f"Number of time-series {len(all_ts_ids):,}")
+excluded_ids = list(set(df_train['ts_id']) - set(df_train_clean['ts_id'])) 
 
-# buildings that are frequently near zero, but that are rarely above 1-2, so this isn't anomalous per se
-# TODO: use more sophisticated method (e.g. proportion of weeks where median value was < 10)
-excluded_ids = {}
-excluded_ids['small'] = df_train.\
-    assign(low_value = lambda df: df['meter_reading'] < 10).\
-    groupby('ts_id')\
-    ['low_value'].mean().\
-    reset_index().\
-    query("low_value > 0.50").\
-    loc[:,'ts_id'].tolist()
+# TODO: '53_electricity' may not be great to exclude
+print(
+    ggplot(df_train.loc[df_train['ts_id'].isin(excluded_ids),:], aes(x='timestamp')) +
+    geom_line(aes(y='meter_reading')) +
+     ggtitle("Excluded (will just predict 0 for test)") +
+     theme(figure_size=(12,5))  +
+     #scale_y_continuous(trans='log1p') +
+     facet_wrap("~ts_id", scales='free')
+)
 
-print(f"Number of 'small' time-series excluded: {len(excluded_ids['small'])}")
 
-# near zero buildings:
-_good = df_train. \
-            loc[~df_train['ts_id'].isin(excluded_ids['small']), :]. \
-            query("near_zero_cumu < .5"). \
-            groupby('ts_id') \
-            ['near_zero'].mean(). \
-            reset_index(). \
-            query("near_zero < 0.10"). \
-            loc[:, 'ts_id'].tolist()
+# -
 
-excluded_ids['near_zero'] = list(set(all_ts_ids) - set(_good) - set(excluded_ids['small']))
+# ## Clean Readings
 
-print(f"Number of time-series with too much near-zero-data excluded: {len(excluded_ids['near_zero'])}")
+def clean_readings(df: pd.DataFrame,
+                   roll_days: tuple = (3, 14),
+                   multis: tuple = (0.66, 1.33),
+                   group_colname: str = 'ts_id',
+                   value_colname: str = 'meter_reading',
+                   std_dev_theshold: float = .01):
+    df = df.copy()
+    df[f'{value_colname}_clean'] = df[value_colname].where(df[value_colname] > 0.0)
 
-df_train_clean = df_train. \
-    loc[~df_train['ts_id'].isin(excluded_ids['small']) & ~df_train['ts_id'].isin(excluded_ids['near_zero']),:].\
-    query("near_zero_cumu < .5"). \
-    reset_index(drop=True). \
-    drop(columns=['near_zero', 'near_zero_cumu'])
+    # running sd:
+    df['rolling_std'] = df.groupby(group_colname)[value_colname]. \
+        rolling(roll_days[0] * 24, center=True).std().reset_index(0, drop=True)
+    df.loc[df['rolling_std'] <= std_dev_theshold, f'{value_colname}_clean'] = np.nan
+
+    # running lower bound:
+    # two-pass to deal w/tradeoff between avoiding false-alarms on meters like 256,
+    # while not letting ones like 1269 through
+    # (living with mediocre cleaning for: 746)
+    df['_lb'] = df.groupby(group_colname)[f'{value_colname}_clean'].rolling(24, center=True).min().reset_index(0,drop=True)
+    p1 = df.groupby(group_colname)['_lb']. \
+        rolling(roll_days[1] * 24, center=True).median().reset_index(0, drop=True)
+    p2 = df.groupby(group_colname)['_lb']. \
+        rolling(roll_days[0] * 24, center=True).median().reset_index(0, drop=True)
+    df['_lb_roll'] = (p1 + p2) / 2
+    df['_lb_roll'].fillna(df.groupby([group_colname])['_lb_roll'].transform('min'), inplace=True)
+
+    # running upper bound:
+    df['_ub'] = df.groupby(group_colname)[f'{value_colname}_clean']. \
+        rolling(24, center=True).max().reset_index(0, drop=True)
+    df['_ub_roll'] = df.groupby(group_colname)['_ub']. \
+        rolling(roll_days[1] * 24, center=True).median().reset_index(0, drop=True)
+    df['_ub_roll'].fillna(df.groupby([group_colname])['_ub_roll'].transform('max'), inplace=True)
+
+    # clean:
+    df['lower_thresh'] = df['_lb_roll'] * multis[0]
+    df.loc[df[f'{value_colname}_clean'] <= df['lower_thresh'], f'{value_colname}_clean'] = np.nan
+    bound_diff = df['_ub_roll'] - df['_lb_roll']
+    df['upper_thresh'] = df['_ub_roll'] + multis[1] * bound_diff
+    df.loc[df[f'{value_colname}_clean'] >= df['upper_thresh'], f'{value_colname}_clean'] = np.nan
+
+    del df['_lb']
+    del df['_lb_roll']
+    del df['_ub']
+    del df['_ub_roll']
+
+    return df
+
 
 # + {"hideCode": false, "hidePrompt": false}
 df_example = clean_readings(df_train_clean.query("building_id == building_id.sample().item()")) 
@@ -148,7 +177,7 @@ print(
     geom_line(aes(y='meter_reading'), color='red') +
      geom_line(aes(y='meter_reading_clean')) +
      ggtitle(str(df_example['building_id'].unique().item())) +
-     theme(figure_size=(12,3.5*df_example['ts_id'].nunique())) +
+     theme(figure_size=(12,3.*df_example['ts_id'].nunique())) +
      geom_ribbon(aes(ymin='lower_thresh', ymax='upper_thresh'), fill=None, linetype='dashed', color='black') +
      scale_y_continuous(trans='log1p') +
      facet_wrap("~meter",ncol=1)
@@ -163,9 +192,6 @@ df_train_clean = clean_readings(df_train_clean, group_colname='ts_id')
 df_train_clean. \
     loc[:, ['building_id', 'timestamp', 'meter', 'meter_reading', 'meter_reading_clean']]. \
     to_feather(os.path.join(clean_data_dir, "df_train_clean.feather"))
-
-# + {"hideCode": false, "hidePrompt": false}
-# TODO: save small series
-# TODO: save degenerate series
+# -
 
 

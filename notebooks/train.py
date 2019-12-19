@@ -45,12 +45,12 @@ np.random.seed(2019-12-12)
 rs = np.random.RandomState(2019-12-12)
 
 # +
-METER_TYPE = os.environ.get("METER_TYPE", "chilledwater")
+METER_TYPE = os.environ.get("METER_TYPE", "electricity")
 
 NN_PRETRAIN_NUM_EPOCHS = os.environ.get("NN_PRETRAIN_NUM_EPOCHS", 200 if METER_TYPE=='electricity' else 100 )
 NN_PRETRAIN_LR = os.environ.get("NN_PRETRAIN_LR", .002 if METER_TYPE=='electricity' else .001 )
 
-KF_TRAIN_NUM_EPOCHS = os.environ.get("KF_TRAIN_NUM_EPOCHS", 25 if METER_TYPE=='electricity' else 20 )
+KF_TRAIN_NUM_EPOCHS = os.environ.get("KF_TRAIN_NUM_EPOCHS", 25 if METER_TYPE=='electricity' else 10 )
 KF_TRAIN_LR = os.environ.get("KF_TRAIN_LR", .01)
 
 MODEL_DIR = os.path.join(PROJECT_ROOT, "models", METER_TYPE)
@@ -271,9 +271,9 @@ for epoch in range(KF_TRAIN_NUM_EPOCHS):
             if nm == 'train':
                 kf.optimizer.zero_grad()
             kf.df_loss.append({'value' : loss.item(), 'dataset' : nm, 'epoch' : epoch})
-            print(f"{nm} loss {loss.item():.3f}")
+            print(f"{nm} batch {i} loss {loss.item():.3f}")
     clear_output(wait=True)
-    print(loss_plot(kf.df_loss) + ggtitle(f"Epoch {epoch}, batch {i}"))
+    print(loss_plot(kf.df_loss) + ggtitle(f"Epoch {epoch}"))
     
     torch.save(kf.state_dict(), f"{MODEL_DIR}/kf_state_dict.pkl")
     torch.save(pred_nn_module.state_dict(), f"{MODEL_DIR}/pred_nn_module_state_dict.pkl")
@@ -306,8 +306,8 @@ df_val_forecast = pd.concat(df_val_forecast)
 
 # +
 df_example = df_val_forecast.\
-            query("(building_id == 1191) & (timestamp.dt.month >= 2)").\
-              merge(df_mt_trainval, how='left')
+             query("(building_id == building_id.sample().item()) & (timestamp.dt.month >= 2)").\
+             merge(df_mt_trainval, how='left')
 
 print(
     ggplot(df_example, 

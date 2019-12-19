@@ -14,7 +14,7 @@
 # ---
 
 # + {"hideCode": false, "hidePrompt": false}
-from ashrae import DATA_DIR, PROJECT_ROOT
+from ashrae import DATA_DIR, PROJECT_ROOT, meter_mapping
 
 try:
     from plotnine import *
@@ -31,7 +31,6 @@ import os
 
 # + {"hideCode": false, "hidePrompt": false}
 df_train = pd.read_csv(os.path.join(DATA_DIR, "train.csv"), parse_dates=['timestamp'])
-meter_mapping = {0: 'electricity', 1: 'chilledwater', 2: 'steam', 3: 'hotwater'}
 df_train['meter'] = df_train['meter'].map(meter_mapping).astype('category')
 df_train
 
@@ -190,8 +189,5 @@ df_train_clean = clean_readings(df_train_clean, group_colname='ts_id')
 clean_data_dir = os.path.join(PROJECT_ROOT, "clean-data")
 os.makedirs(clean_data_dir, exist_ok=True)
 df_train_clean. \
-    loc[:, ['building_id', 'timestamp', 'meter', 'meter_reading', 'meter_reading_clean']]. \
+    loc[:, ['building_id', 'timestamp', 'meter', 'meter_reading', 'meter_reading_clean','lower_thresh']]. \
     to_feather(os.path.join(clean_data_dir, "df_train_clean.feather"))
-# -
-
-

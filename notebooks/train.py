@@ -14,7 +14,7 @@
 # ---
 
 # +
-from ashrae import DATA_DIR, PROJECT_ROOT
+from ashrae import DATA_DIR, PROJECT_ROOT, meter_mapping
 from ashrae.nn import MultiSeriesStateNN, TimeSeriesStateNN
 from ashrae.preprocessing import DataFrameScaler
 from ashrae.training import forward_backward
@@ -84,8 +84,10 @@ df_mt_trainval = df_train_clean.\
     loc[df_train_clean['meter'] == METER_TYPE,:].\
     loc[:,['building_id', 'timestamp', 'meter_reading', 'meter_reading_clean']].\
     reset_index(drop=True).\
-    assign(meter_reading_clean_pp=lambda df: np.log1p(df['meter_reading_clean']))
-
+    assign(
+        meter_reading_log1p=lambda df: np.log1p(df['meter_reading']),
+        meter_reading_clean_pp=lambda df:  np.log1p(df['meter_reading_clean']) # will be modified in next step
+    )
 mt_scaler = DataFrameScaler(
         value_colnames=['meter_reading_clean_pp'],
         group_colname='building_id',
@@ -287,7 +289,6 @@ val_forecast_dt = np.datetime64('2016-06-01')
 df_val_forecast = []
 for batch in dl_val:
     batch = batch.split_measures(slice(1), slice(1, None))
-    batch.tensors[1][torch.isnan(batch.tensors[1])] = 0.0 
     with torch.no_grad():
         readings, predictors = (t.clone() for t in batch.tensors)
         readings[np.where(batch.times() > val_forecast_dt)] = float('nan')
@@ -347,6 +348,55 @@ print(
     geom_hline(yintercept=0.0) 
 )
 # -
+# ## Export
 
+# +
+OUTPUT_DIR = os.path.join(PROJECT_ROOT, "output")
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+df_test = pd.read_csv(os.path.join(DATA_DIR,"test.csv"), parse_dates=['timestamp'])
+df_test['meter'] = df_test['meter'].map(meter_mapping).astype('category')
+df_mt_test = pd.concat([
+    df_mt_trainval.\
+        loc[:,['building_id','timestamp','meter_reading_clean_pp']].\
+        assign(row_id=-1).\
+        reset_index(drop=True),
+    df_test.\
+        loc[df_test['meter']==METER_TYPE,:].\
+        drop(columns=['meter']).\
+        reset_index(drop=True)
+], sort=True)
+
+df_mt_test['chunk'] = np.floor(df_mt_test['building_id'] / 50).astype('int')
+
+for chunk, df_in in df_mt_test.groupby('chunk'):
+    dl = dataloader_factory(df_in, reading_colname='meter_reading_clean_pp', batch_size=50)
+    assert len(dl) == 1
+    batch = next(iter(dl)).split_measures(slice(1), slice(1, None))
+    with torch.no_grad():
+        readings, predictors = (t.clone() for t in batch.tensors)
+        predictors[torch.isnan(predictors)] = 0.
+        pred = kf(
+            readings,
+            start_datetimes=batch.start_datetimes,
+            predictors=predictors,
+            progress=tqdm_notebook
+        )
+    df_pred = pred.to_dataframe(batch, **colname_config).\
+      query("measure == 'meter_reading_clean_pp'").\
+      drop(columns=['measure'])
+    
+    df_out = df_pred.\
+      merge(df_in.loc[:,['building_id', 'timestamp', 'row_id']], on=['building_id', 'timestamp']).\
+      rename(columns={'predicted_mean' : 'meter_reading_clean_pp'}).\
+      pipe(mt_scaler.inverse_transform, keep_cols=['row_id']).\
+      assign(meter_reading = lambda df: np.expm1(df['meter_reading_clean_pp'])).\
+      query("row_id >= 0").\
+      loc[:,['row_id', 'meter_reading']].\
+      reset_index(drop=True)
+    path = os.path.join(OUTPUT_DIR, f"{METER_TYPE}-{chunk}.feather")
+    print(path)
+    df_out.to_feather(path)
+# -
 
 

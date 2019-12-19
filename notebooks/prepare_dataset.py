@@ -39,7 +39,10 @@ colname_config = {
 # ## Weather Data
 
 # +
-df_weather_trainval = pd.read_csv(os.path.join(DATA_DIR, "weather_train.csv"), parse_dates=['timestamp'])
+df_weather = pd.concat([
+    pd.read_csv(os.path.join(DATA_DIR, "weather_train.csv"), parse_dates=['timestamp']),
+    pd.read_csv(os.path.join(DATA_DIR, "weather_test.csv"), parse_dates=['timestamp'])
+])
 
 
 def get_rel_humidity(air_temp: np.ndarray, dew_temp: np.ndarray) -> np.ndarray:
@@ -48,20 +51,18 @@ def get_rel_humidity(air_temp: np.ndarray, dew_temp: np.ndarray) -> np.ndarray:
     return numer / denom
 
 
-df_weather_trainval['relative_humidity'] = \
-    get_rel_humidity(df_weather_trainval['air_temperature'], df_weather_trainval.pop('dew_temperature'))
-df_weather_trainval['is_raining'] = (df_weather_trainval['precip_depth_1_hr'].fillna(0.0) > 0.0).astype('int')
+df_weather['relative_humidity'] = get_rel_humidity(df_weather['air_temperature'], df_weather.pop('dew_temperature'))
+df_weather['is_raining'] = (df_weather['precip_depth_1_hr'].fillna(0.0) > 0.0).astype('int')
 
 # +
 weather_preds = [
     'air_temperature', 'relative_humidity', 'is_raining', 'sea_level_pressure', 'wind_speed', 'cloud_coverage'
 ]
-weather_scaler = DataFrameScaler(value_colnames=weather_preds).fit(df_weather_trainval)
-df_weather_trainval_pp = weather_scaler.transform(df_weather_trainval, keep_cols=('site_id','timestamp'))
-df_weather_trainval_pp['air_temperature_hi'] =\
-    df_weather_trainval_pp['air_temperature'].where(df_weather_trainval_pp['air_temperature'] > 0, 0.0)
-df_weather_trainval_pp['air_temperature_lo'] =\
-    df_weather_trainval_pp['air_temperature'].where(df_weather_trainval_pp.pop('air_temperature') <= 0, 0.0)
+weather_scaler = DataFrameScaler(value_colnames=weather_preds).fit(df_weather)
+df_weather_pp = weather_scaler.transform(df_weather, keep_cols=('site_id','timestamp'))
+df_weather_pp['air_temperature_hi'] = df_weather_pp['air_temperature'].where(df_weather_pp['air_temperature'] > 0, 0.0)
+df_weather_pp['air_temperature_lo'] = df_weather_pp['air_temperature'].where(df_weather_pp['air_temperature'] <= 0, 0.0)
+df_weather_pp.pop('air_temperature')
 
 weather_preds.remove('air_temperature')
 weather_preds.extend(['air_temperature_hi','air_temperature_lo'])
@@ -89,7 +90,7 @@ primary_uses = df_meta_predictors['primary_use'].unique()
 # -
 
 df_holidays = calendar().\
-    holidays(start=df_weather_trainval_pp['timestamp'].min(), end=pd.Timestamp.today(), return_name=True).\
+    holidays(start=df_weather['timestamp'].min(), end=pd.Timestamp.today(), return_name=True).\
     reset_index().\
     rename(columns={0 : 'holiday', 'index' : 'start'}).\
     assign(end= lambda df: df['start'] + pd.Timedelta('1D'),
@@ -105,7 +106,7 @@ df_holidays['holiday'].cat.add_categories(['None'], inplace=True)
 df_holidays['holiday'].cat.reorder_categories(new_categories=['None'] + holidays, inplace=True)
 
 # +
-df_tv_predictors_trainval = df_weather_trainval_pp.\
+df_tv_predictors = df_weather_pp.\
     merge(df_holidays, how='left', on=['timestamp']).\
     assign(
         is_weekday=lambda df: (df['timestamp'].dt.weekday < 5).astype('int'),
@@ -113,17 +114,17 @@ df_tv_predictors_trainval = df_weather_trainval_pp.\
     ).\
     reset_index(drop=True)
 
-# df_tv_predictors_trainval['hour_in_day'] = df_tv_predictors_trainval['timestamp'].dt.hour
-df_tv_predictors_trainval = pd.concat([
-    df_tv_predictors_trainval, 
-    pd.get_dummies(df_tv_predictors_trainval['timestamp'].dt.hour, prefix='hour', drop_first=True)
+# df_tv_predictors['hour_in_day'] = df_tv_predictors['timestamp'].dt.hour
+df_tv_predictors = pd.concat([
+    df_tv_predictors,
+    pd.get_dummies(df_tv_predictors['timestamp'].dt.hour, prefix='hour', drop_first=True)
 ], 
     axis=1)
 
-df_tv_predictors_trainval = pd.concat([
-    df_tv_predictors_trainval, 
+df_tv_predictors = pd.concat([
+    df_tv_predictors,
     fourier_model_mat(
-        dt=df_tv_predictors_trainval['timestamp'], 
+        dt=df_tv_predictors['timestamp'],
         K=3,
         period='daily',
         start_dt=season_config['season_start'].to_datetime64(),
@@ -133,10 +134,10 @@ df_tv_predictors_trainval = pd.concat([
     axis=1
 )
 
-df_tv_predictors_trainval = pd.concat([
-    df_tv_predictors_trainval, 
+df_tv_predictors = pd.concat([
+    df_tv_predictors,
     fourier_model_mat(
-        dt=df_tv_predictors_trainval['timestamp'], 
+        dt=df_tv_predictors['timestamp'],
         K=4,
         period='yearly',
         start_dt=season_config['season_start'].to_datetime64(),
@@ -146,12 +147,12 @@ df_tv_predictors_trainval = pd.concat([
     axis=1
 )
 
-tv_preds = [c for c in df_tv_predictors_trainval.columns if c not in ['building_id', 'timestamp', 'site_id']]
+tv_preds = [c for c in df_tv_predictors.columns if c not in ['building_id', 'timestamp', 'site_id']]
 # -
 
 dataloader_factory = DataLoaderFactory(
     df_meta_preds=df_meta_predictors,
-    df_tv_preds=df_tv_predictors_trainval,
+    df_tv_preds=df_tv_predictors,
     predictors=tv_preds + meta_preds,
     **colname_config
 )

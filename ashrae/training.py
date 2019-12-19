@@ -18,23 +18,32 @@ class DataLoaderFactory:
         self.df_tv_preds = df_tv_preds
         self.predictors = list(predictors)
         assert group_colname == 'building_id'
+        assert time_colname == 'timestamp'
         self.colnames = {'group_colname': group_colname, 'time_colname': time_colname}
 
     def __call__(self, df_readings: pd.DataFrame, reading_colname: str, **kwargs) -> 'TimeSeriesDataLoader':
+        # filter out buildings not in readings:
         buildings = df_readings['building_id'].unique()
         df_meta_preds = self.df_meta_preds.loc[self.df_meta_preds['building_id'].isin(buildings), :]
 
+        # filter by max date of readings:
+        max_dt = df_readings['timestamp'].max()
+        df_tv_preds = self.df_tv_preds.loc[self.df_tv_preds['timestamp'] <= max_dt,:]
+
         # join:
         df_joined = df_meta_preds. \
-            merge(self.df_tv_preds, on=['site_id'], how='inner'). \
+            merge(df_tv_preds, on=['site_id'], how='inner'). \
             merge(df_readings, on=['building_id', 'timestamp'], how='left'). \
             fillna({c: 0.0 for c in self.predictors})
 
         # filter out dates before the building started:
-        _nonnull_rows = ~df_joined[reading_colname].isnull()
-        _min_dts = df_joined.loc[_nonnull_rows, :].groupby('building_id')['timestamp'].min().to_dict()
         df_joined = df_joined. \
-            assign(_min_dt=lambda df: df['building_id'].map(_min_dts)). \
+            merge(
+            df_joined.loc[~df_joined[reading_colname].isnull(), :]. \
+                groupby('building_id'). \
+                agg(_min_dt=('timestamp', 'min')). \
+                reset_index()
+        ). \
             query("timestamp >= _min_dt")
 
         # create dataloader:

@@ -20,7 +20,7 @@ class DesignWithProbit(Design):
         # we fix the measure covariance for probit dimensions, since it's not identifiable:
         self.measure_covariance = PartialCovarianceFromLogCholesky(
             full_dim_names=self.measures,
-            partial_dim_names=self.probit_measures,
+            partial_dim_names=[m for m in self.measures if m not in self.probit_measures],
             diag=1.0
         )
 

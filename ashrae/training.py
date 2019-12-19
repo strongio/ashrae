@@ -1,6 +1,6 @@
 import numpy as np
 import torch
-from torch_kalman.kalman_filter import KalmanFilter
+
 from torch_kalman.utils.data import TimeSeriesDataset, TimeSeriesDataLoader
 
 import pandas as pd
@@ -21,14 +21,19 @@ class DataLoaderFactory:
         assert time_colname == 'timestamp'
         self.colnames = {'group_colname': group_colname, 'time_colname': time_colname}
 
-    def __call__(self, df_readings: pd.DataFrame, reading_colname: str, **kwargs) -> 'TimeSeriesDataLoader':
+    def __call__(self,
+                 df_readings: pd.DataFrame,
+                 reading_colname: str = 'meter_reading_clean_pp',
+                 drop_colname: str = 'is_drop',
+                 **kwargs) -> 'TimeSeriesDataLoader':
         # filter out buildings not in readings:
         buildings = df_readings['building_id'].unique()
         df_meta_preds = self.df_meta_preds.loc[self.df_meta_preds['building_id'].isin(buildings), :]
 
         # filter by max date of readings:
         max_dt = df_readings['timestamp'].max()
-        df_tv_preds = self.df_tv_preds.loc[self.df_tv_preds['timestamp'] <= max_dt,:]
+        assert self.df_tv_preds['timestamp'].max() >= max_dt
+        df_tv_preds = self.df_tv_preds.loc[self.df_tv_preds['timestamp'] <= max_dt, :]
 
         # join:
         df_joined = df_meta_preds. \
@@ -47,10 +52,11 @@ class DataLoaderFactory:
             query("timestamp >= _min_dt")
 
         # create dataloader:
+        y_colnames = [col for col in (reading_colname, drop_colname) if col]
         dataloader = TimeSeriesDataLoader.from_dataframe(
             df_joined,
             **self.colnames,
-            measure_colnames=[reading_colname] + self.predictors,
+            measure_colnames=y_colnames + self.predictors,
             dt_unit='h',
             **kwargs
         )

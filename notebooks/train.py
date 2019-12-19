@@ -85,10 +85,21 @@ df_mt_trainval = df_train_clean.\
     loc[:,['building_id', 'timestamp', 'meter_reading', 'meter_reading_clean', 'lower_thresh']].\
     reset_index(drop=True).\
     assign(
-        lower_thresh_log1p=lambda df: np.log1p(df['lower_thresh']),
-        meter_reading_log1p=lambda df: np.log1p(df['meter_reading']),
+        is_drop=lambda df: (df['meter_reading'] < df['lower_thresh']).astype('float'),
         meter_reading_clean_pp=lambda df:  np.log1p(df['meter_reading_clean']) # will be modified in next step
     )
+
+# don't train on buildings (a) if geometric mean is less than ~10, (b) if very few unique values:
+train_ids = df_mt_trainval.\
+    assign(_log1p_mean = lambda df: df.groupby('building_id')['meter_reading_clean_pp'].transform('mean'),
+           _nunique = lambda df: df.groupby('building_id')['meter_reading_clean'].transform('nunique')).\
+    query("(_log1p_mean > 2.5) & (_nunique > 50)").\
+    loc[:,'building_id'].\
+    drop_duplicates().\
+    sample(frac=.80).tolist()
+val_ids = [id for id in df_mt_trainval['building_id'].drop_duplicates() if id not in train_ids]
+print(f"Training {len(train_ids)}, validation {len(val_ids)}")
+
 mt_scaler = DataFrameScaler(
         value_colnames=['meter_reading_clean_pp'],
         group_colname='building_id',
@@ -98,19 +109,15 @@ mt_scaler = DataFrameScaler(
 
 df_mt_trainval = mt_scaler.transform(df_mt_trainval, keep_cols='all')
 
-train_ids = df_mt_trainval['building_id'].drop_duplicates().sample(frac=.75).tolist()
-val_ids = [id for id in df_mt_trainval['building_id'].drop_duplicates() if id not in train_ids]
-print(f"Training {len(train_ids)}, validation {len(val_ids)}")
-
 dl_train = dataloader_factory(
     df_readings=df_mt_trainval.loc[df_mt_trainval['building_id'].isin(train_ids)],
     batch_size=50,
-    reading_colname='meter_reading_clean_pp'
+    drop_colname=False
 )
 dl_val = dataloader_factory(
     df_readings=df_mt_trainval.loc[df_mt_trainval['building_id'].isin(val_ids)],
     batch_size=100,
-    reading_colname='meter_reading_clean_pp'
+    drop_colname=False
 )
 
 print("...finished")

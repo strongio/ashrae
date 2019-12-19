@@ -14,8 +14,12 @@ class DataFrameScaler(TransformerMixin, BaseEstimator):
 
     def fit(self, X: pd.DataFrame, y: None = None, **kwargs) -> 'DataFrameScaler':
         group_colname = self.group_colname or '_dummy'
-        self._fitted = X.assign(_dummy=1).groupby([group_colname])[self.value_colnames].agg(
-            ['mean', 'std']).reset_index()
+        assert all(value_colname in X.columns for value_colname in self.value_colnames)
+        self._fitted = X.\
+            assign(_dummy=1).\
+            groupby([group_colname])\
+            [self.value_colnames].agg(['mean', 'std']).\
+            reset_index()
         self._fitted.columns = [
             '__'.join(subcol for subcol in col if subcol != '').strip()
             for col in self._fitted.columns.values
@@ -37,6 +41,7 @@ class DataFrameScaler(TransformerMixin, BaseEstimator):
         return out
 
     def transform(self, X: pd.DataFrame, keep_cols: tuple = (), **kwargs) -> pd.DataFrame:
+        assert all(value_colname in X.columns for value_colname in self.value_colnames)
         out = self._merge(X=X, keep_cols=keep_cols)
         for value_colname in self.value_colnames:
             if self.center:
@@ -50,6 +55,7 @@ class DataFrameScaler(TransformerMixin, BaseEstimator):
         return out
 
     def inverse_transform(self, X: pd.DataFrame, keep_cols: tuple = (), **kwargs) -> pd.DataFrame:
+        assert all(value_colname in X.columns for value_colname in self.value_colnames)
         out = self._merge(X=X, keep_cols=keep_cols)
         for value_colname in self.value_colnames:
             if self.scale:

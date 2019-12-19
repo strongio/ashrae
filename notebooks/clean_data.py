@@ -183,12 +183,12 @@ print(
      facet_wrap("~meter",ncol=1)
 )
 # -
-clean_data_dir = os.path.join(PROJECT_ROOT, "clean-data")
-os.makedirs(clean_data_dir, exist_ok=True)
-
-# + {"hideCode": false, "hidePrompt": false}
 # this takes a little bit
 df_train_clean = clean_readings(df_train_clean, group_colname='ts_id')
+
+# + {"hideCode": false, "hidePrompt": false}
+clean_data_dir = os.path.join(PROJECT_ROOT, "clean-data")
+os.makedirs(clean_data_dir, exist_ok=True)
 df_train_clean. \
     loc[:, ['building_id', 'timestamp', 'meter', 'meter_reading', 'meter_reading_clean']]. \
     to_feather(os.path.join(clean_data_dir, "df_train_clean.feather"))

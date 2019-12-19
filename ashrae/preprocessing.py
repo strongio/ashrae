@@ -20,6 +20,10 @@ class DataFrameScaler(TransformerMixin, BaseEstimator):
             '__'.join(subcol for subcol in col if subcol != '').strip()
             for col in self._fitted.columns.values
         ]
+        for colname in self._fitted.columns:
+            # if no std-dev, just set to 1.0:
+            if colname.endswith('std'):
+                self._fitted[colname] = self._fitted[colname].where(self._fitted[colname] > 0.0, 1.0)
         return self
 
     def _merge(self, X: pd.DataFrame, keep_cols: tuple) -> pd.DataFrame:

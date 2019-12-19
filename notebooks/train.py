@@ -17,7 +17,7 @@
 from ashrae import DATA_DIR, PROJECT_ROOT, meter_mapping
 from ashrae.nn import MultiSeriesStateNN, TimeSeriesStateNN
 from ashrae.preprocessing import DataFrameScaler
-from ashrae.training import forward_backward
+from ashrae.forecaster import Forecaster
 
 try:
     from plotnine import *
@@ -45,7 +45,7 @@ np.random.seed(2019-12-12)
 rs = np.random.RandomState(2019-12-12)
 
 # +
-METER_TYPE = os.environ.get("METER_TYPE", "electricity")
+METER_TYPE = os.environ.get("METER_TYPE", "chilledwater")
 
 NN_PRETRAIN_NUM_EPOCHS = os.environ.get("NN_PRETRAIN_NUM_EPOCHS", 200 if METER_TYPE=='electricity' else 100 )
 NN_PRETRAIN_LR = os.environ.get("NN_PRETRAIN_LR", .002 if METER_TYPE=='electricity' else .001 )
@@ -82,9 +82,10 @@ print(f"Preparing {METER_TYPE} dataset...")
 
 df_mt_trainval = df_train_clean.\
     loc[df_train_clean['meter'] == METER_TYPE,:].\
-    loc[:,['building_id', 'timestamp', 'meter_reading', 'meter_reading_clean']].\
+    loc[:,['building_id', 'timestamp', 'meter_reading', 'meter_reading_clean', 'lower_thresh']].\
     reset_index(drop=True).\
     assign(
+        lower_thresh_log1p=lambda df: np.log1p(df['lower_thresh']),
         meter_reading_log1p=lambda df: np.log1p(df['meter_reading']),
         meter_reading_clean_pp=lambda df:  np.log1p(df['meter_reading_clean']) # will be modified in next step
     )
@@ -210,7 +211,7 @@ del pred_nn_module.sequential[-1]
 pred_nn_module
 
 # +
-kf = KalmanFilter(
+kf = Forecaster(
     processes=[
         LocalLevel('level').add_measure('meter_reading_clean_pp'),
         
@@ -264,8 +265,7 @@ for epoch in range(KF_TRAIN_NUM_EPOCHS):
             batch = batch.split_measures(slice(1), slice(1, None))
             batch.tensors[1][torch.isnan(batch.tensors[1])] = 0.0 
             with torch.set_grad_enabled(nm == 'train'):
-                loss = forward_backward(
-                    model=kf, 
+                loss = kf.forward_backward(
                     batch=batch, 
                     delete_interval='60D', 
                     random_state=rs if nm == 'val' else None
@@ -299,8 +299,8 @@ for batch in dl_val:
             predictors=predictors,
             progress=True
         )
-    df = pred.to_dataframe({'start_times': batch.start_times, 'group_names': batch.group_names}, **colname_config).\
-      query("measure=='meter_reading_clean_pp'").\
+    df = pred.to_dataframe(batch, **colname_config).\
+      query("measure == 'meter_reading_clean_pp'").\
       drop(columns=['measure'])
     df_val_forecast.append(df)
 df_val_forecast = pd.concat(df_val_forecast)

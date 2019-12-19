@@ -104,15 +104,4 @@ def remove_random_dates(batch: 'TimeSeriesDataset',
     return batch.with_new_tensors(*new_tensors)
 
 
-def forward_backward(model: 'KalmanFilter',
-                     batch: 'TimeSeriesDataset',
-                     **kwargs) -> 'TimeSeriesDataset':
-    batch = remove_random_dates(batch, which=0, **kwargs)
-    readings, predictors = batch.tensors
-    prediction = model(readings, start_datetimes=batch.start_datetimes, predictors=predictors)
-    lp = prediction.log_prob(readings)
-    loss = -lp.mean()
-    if loss.requires_grad:
-        loss.backward()
-        model.optimizer.step()
-    return loss
+

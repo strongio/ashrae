@@ -204,7 +204,7 @@ print(
     ggtitle(str(df_example['building_id'].unique().item()))
 )
 
-# ## KF
+# #### Copy Pretraining
 
 # +
 pred_nn_module = TimeSeriesStateNN(**pretrain_nn_module._init_kwargs)
@@ -216,6 +216,81 @@ assert isinstance(pred_nn_module.sequential[-1], torch.nn.Tanh)
 del pred_nn_module.sequential[-1]
 
 pred_nn_module
+# -
+
+# ## Drop Prediction
+
+# +
+drop_nn_module = TimeSeriesStateNN(
+    **pred_nn_module._init_kwargs, 
+    additional_layers=[
+        torch.nn.Linear(pred_nn_module.sequential[-1].out_features, 4, bias=False),
+        torch.nn.LogSoftmax()
+    ]
+)
+
+for param_name, from_param in pred_nn_module.named_parameters():
+    to_param = dict(drop_nn_module.named_parameters())[param_name]
+    to_param.data[:] = from_param.data[:]
+
+drop_nn_module.loss_fun = torch.nn.NLLLoss()
+    
+drop_nn_module
+# -
+
+# TODO: use lower-bound and/or lagged values as predictors
+dl_drops_train = dataloader_factory(
+    df_readings=df_mt_trainval.loc[df_mt_trainval['building_id'].isin(train_ids)],
+    batch_size=50,
+    drop_colname='is_drop',
+    reading_colname=False
+)
+dl_drops_val = dataloader_factory(
+    df_readings=df_mt_trainval.loc[df_mt_trainval['building_id'].isin(val_ids)],
+    batch_size=100,
+    drop_colname='is_drop',
+    reading_colname=False
+)
+
+# +
+drop_nn_module.optimizer = torch.optim.Adam(drop_nn_module.parameters(), lr=NN_PRETRAIN_LR)
+drop_nn_module.df_loss = []
+
+try:
+    drop_nn_module.load_state_dict(torch.load(f"{MODEL_DIR}/drop_nn_module_state_dict.pkl"))
+    NN_PRETRAIN_NUM_EPOCHS = 0
+except FileNotFoundError:
+    print(f"Pre-training NN-module for {NN_PRETRAIN_NUM_EPOCHS} epochs...")
+    
+for epoch in range(NN_PRETRAIN_NUM_EPOCHS):
+    for i, (tb, vb) in enumerate(zip_longest(dl_drops_train, dl_drops_val)):
+        for nm, batch in {'train' : tb, 'val' : vb}.items():
+            if not batch:
+                continue
+            batch = batch.split_measures(slice(1), slice(1, None))
+            
+            y, X = batch.tensors
+            X[torch.isnan(X)] = 0.0
+            y = y.squeeze(-1) # batches support multivariate, but we want to squeeze the singleton dim
+            with torch.set_grad_enabled(nm == 'train'):
+                prediction = drop_nn_module(X)
+                loss = drop_nn_module.loss_fun(input=prediction[y == y].unsqueeze(-1),
+                                               target=y[y == y].unsqueeze(-1).to(torch.long))
+                
+            if nm == 'train':
+                loss.backward()
+                drop_nn_module.optimizer.step()
+                drop_nn_module.optimizer.zero_grad()
+            drop_nn_module.df_loss.append({'value' : loss.item(), 'dataset' : nm, 'epoch' : epoch})
+            print(f"batch {i}, {nm} loss {loss.item():.3f}")
+            
+    clear_output(wait=True)        
+    print(loss_plot(drop_nn_module.df_loss) + ggtitle(f"Epoch {epoch}"))
+        
+    torch.save(drop_nn_module.state_dict(), f"{MODEL_DIR}/drop_nn_module_state_dict.pkl")
+# -
+
+# ## KF
 
 # +
 kf = Forecaster(

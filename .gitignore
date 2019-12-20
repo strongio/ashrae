@@ -127,7 +127,6 @@ dmypy.json
 # misc
 *.DS_Store
 data/*
-*.ipynb
 *.feather
 .idea/*
 *.zip

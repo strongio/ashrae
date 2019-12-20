@@ -26,6 +26,8 @@ except ImportError:
     from ashrae.fake_plotnine import *
     clear_output = lambda wait: None
     
+from tqdm import tqdm_notebook    
+
 import os
 
 import numpy as np
@@ -45,10 +47,13 @@ np.random.seed(2019-12-12)
 rs = np.random.RandomState(2019-12-12)
 
 # +
-METER_TYPE = os.environ.get("METER_TYPE", "chilledwater")
+METER_TYPE = os.environ.get("METER_TYPE", "steam")
 
 NN_PRETRAIN_NUM_EPOCHS = os.environ.get("NN_PRETRAIN_NUM_EPOCHS", 200 if METER_TYPE=='electricity' else 100 )
 NN_PRETRAIN_LR = os.environ.get("NN_PRETRAIN_LR", .002 if METER_TYPE=='electricity' else .001 )
+
+NN_DROP_NUM_EPOCHS = os.environ.get("NN_DROP_NUM_EPOCHS", 100 )
+NN_DROP_LR = os.environ.get("NN_DROP_LR", .005 )
 
 KF_TRAIN_NUM_EPOCHS = os.environ.get("KF_TRAIN_NUM_EPOCHS", 25 if METER_TYPE=='electricity' else 10 )
 KF_TRAIN_LR = os.environ.get("KF_TRAIN_LR", .01)
@@ -123,11 +128,11 @@ dl_val = dataloader_factory(
 print("...finished")
 # -
 
-# ## NN Module
+# ## Pretrain NN 
 
 print(dataloader_factory.predictors)
 pretrain_nn_module = MultiSeriesStateNN(
-    num_series=dataloader_factory.df_meta_preds['building_id'].max(),
+    num_series=dataloader_factory.df_meta_preds['building_id'].max() + 1, 
     num_predictors=len(dataloader_factory.predictors),
     hidden=(50,25,15),
     embed_inputs={
@@ -145,8 +150,6 @@ if METER_TYPE != 'electricity':
     sd = torch.load(os.path.join(MODEL_DIR, "../electricity", "pretrain_nn_module_state_dict.pkl"))
     pretrain_nn_module.load_state_dict(sd)
     print("Will initialize pretrain_nn_module w/electricity weights.")
-
-# ### Pretraining
 
 # +
 pretrain_nn_module.optimizer = torch.optim.Adam(pretrain_nn_module.parameters(), lr=NN_PRETRAIN_LR)
@@ -204,7 +207,90 @@ print(
     ggtitle(str(df_example['building_id'].unique().item()))
 )
 
-# #### Copy Pretraining
+# ## Drop Prediction
+
+# +
+drop_nn_module = MultiSeriesStateNN(
+    num_series=dataloader_factory.df_meta_preds['building_id'].max() + 1,
+    **pretrain_nn_module._init_kwargs
+)
+for param_name, from_param in pretrain_nn_module.named_parameters():
+    to_param = dict(drop_nn_module.named_parameters())[param_name]
+    to_param.data[:] = from_param.data[:]
+    
+drop_nn_module.loss_fun = torch.nn.BCELoss()
+
+#drop_nn_module
+# -
+
+dl_drops = dataloader_factory(
+    df_readings=df_mt_trainval,
+    batch_size=50,
+    drop_colname='is_drop',
+    reading_colname=False
+)
+
+# +
+drop_nn_module.optimizer = torch.optim.Adam(drop_nn_module.parameters(), lr=NN_DROP_LR)
+drop_nn_module.df_loss = []
+
+try:
+    drop_nn_module.load_state_dict(torch.load(f"{MODEL_DIR}/drop_nn_modxule_state_dict.pkl"))
+    NN_DROP_NUM_EPOCHS = 0
+except FileNotFoundError:
+    print(f"Pre-training NN-module for {NN_DROP_NUM_EPOCHS} epochs...")
+    
+for epoch in range(NN_DROP_NUM_EPOCHS):
+    for i, batch in enumerate(dl_drops):
+        batch = batch.split_measures(slice(1), slice(1, None))
+
+        y, X = batch.tensors
+        X[torch.isnan(X)] = 0.0
+        y = y.squeeze(-1) # batches support multivariate, but we want to squeeze the singleton dim
+        prediction = drop_nn_module(X, series_idx=batch.group_names)
+
+        y_train, y_val = y[:,:-1000], y[:,-1000:]
+        pred_train, pred_val = (torch.sigmoid(x) for x in [prediction[:,:-1000], prediction[:,-1000:]])
+
+        loss = drop_nn_module.loss_fun(input=pred_train[y_train==y_train], target=y_train[y_train==y_train])
+        loss_val = drop_nn_module.loss_fun(input=pred_val[y_val==y_val], target=y_val[y_val==y_val])
+
+        loss.backward()
+        drop_nn_module.optimizer.step()
+        drop_nn_module.optimizer.zero_grad()
+        drop_nn_module.df_loss.append({'value' : loss.item(), 'dataset' : 'train', 'epoch' : epoch})
+        drop_nn_module.df_loss.append({'value' : loss_val.item(), 'dataset' : 'val', 'epoch' : epoch})
+        print(f"batch {i}, train loss {loss.item():.3f}")
+
+    clear_output(wait=True)        
+    print(loss_plot(drop_nn_module.df_loss) + ggtitle(f"Epoch {epoch}"))
+        
+    torch.save(drop_nn_module.state_dict(), f"{MODEL_DIR}/drop_nn_module_state_dict.pkl")
+
+# +
+batch = next(iter(dl_drops)).split_measures(slice(1), slice(1, None))
+_, X = batch.tensors
+X[torch.isnan(X)] = 0.0
+df_example = batch.tensor_to_dataframe(
+    tensor=torch.sigmoid(drop_nn_module(X, series_idx=batch.group_names).unsqueeze(-1)),
+    times=batch.times(),
+    group_names=batch.group_names,
+    group_colname='building_id',
+    time_colname='timestamp',
+    measures=['prediction']
+).query("building_id == building_id.sample().item()").merge(df_mt_trainval)
+
+print(
+    ggplot(df_example.query("timestamp.dt.month > 6"), aes(x='timestamp')) +
+    stat_summary_bin(aes(y='is_drop'), fun_y=np.mean, geom='line') +
+    geom_hline(yintercept=0.) +
+    geom_line(aes(y='prediction'), color='red', alpha=.60, size=1.5) +
+    theme(figure_size=(12,5)) +
+    ggtitle(str(df_example['building_id'].unique().item()))
+)
+# -
+
+# ## KF
 
 # +
 pred_nn_module = TimeSeriesStateNN(**pretrain_nn_module._init_kwargs)
@@ -216,80 +302,6 @@ assert isinstance(pred_nn_module.sequential[-1], torch.nn.Tanh)
 del pred_nn_module.sequential[-1]
 
 pred_nn_module
-# -
-
-# ## Drop Prediction
-
-# +
-drop_nn_module = TimeSeriesStateNN(
-    **pred_nn_module._init_kwargs, 
-    additional_layers=[
-        torch.nn.Linear(pred_nn_module.sequential[-1].out_features, 1, bias=True),
-        torch.nn.Sigmoid()
-    ]
-)
-
-for param_name, from_param in pred_nn_module.named_parameters():
-    to_param = dict(drop_nn_module.named_parameters())[param_name]
-    to_param.data[:] = from_param.data[:]
-
-drop_nn_module.loss_fun = torch.nn.BCELoss()
-    
-drop_nn_module
-# -
-
-# TODO: use lower-bound and/or lagged values as predictors
-dl_drops_train = dataloader_factory(
-    df_readings=df_mt_trainval.loc[df_mt_trainval['building_id'].isin(train_ids)],
-    batch_size=50,
-    drop_colname='is_drop',
-    reading_colname=False
-)
-dl_drops_val = dataloader_factory(
-    df_readings=df_mt_trainval.loc[df_mt_trainval['building_id'].isin(val_ids)],
-    batch_size=100,
-    drop_colname='is_drop',
-    reading_colname=False
-)
-
-# +
-drop_nn_module.optimizer = torch.optim.Adam(drop_nn_module.parameters(), lr=NN_PRETRAIN_LR * 2)
-drop_nn_module.df_loss = []
-
-try:
-    drop_nn_module.load_state_dict(torch.load(f"{MODEL_DIR}/drop_nn_module_state_dict.pkl"))
-    NN_PRETRAIN_NUM_EPOCHS = 0
-except FileNotFoundError:
-    print(f"Pre-training NN-module for {NN_PRETRAIN_NUM_EPOCHS} epochs...")
-    
-for epoch in range(NN_PRETRAIN_NUM_EPOCHS):
-    for i, (tb, vb) in enumerate(zip_longest(dl_drops_train, dl_drops_val)):
-        for nm, batch in {'train' : tb, 'val' : vb}.items():
-            if not batch:
-                continue
-            batch = batch.split_measures(slice(1), slice(1, None))
-            
-            y, X = batch.tensors
-            X[torch.isnan(X)] = 0.0
-            y = y.squeeze(-1) # batches support multivariate, but we want to squeeze the singleton dim
-            with torch.set_grad_enabled(nm == 'train'):
-                prediction = drop_nn_module(X)
-                loss = drop_nn_module.loss_fun(input=prediction[y == y].squeeze(-1), target=y[y == y])
-                
-            if nm == 'train':
-                loss.backward()
-                drop_nn_module.optimizer.step()
-                drop_nn_module.optimizer.zero_grad()
-            drop_nn_module.df_loss.append({'value' : loss.item(), 'dataset' : nm, 'epoch' : epoch})
-            print(f"batch {i}, {nm} loss {loss.item():.3f}")
-            
-    clear_output(wait=True)        
-    print(loss_plot(drop_nn_module.df_loss) + ggtitle(f"Epoch {epoch}"))
-        
-    torch.save(drop_nn_module.state_dict(), f"{MODEL_DIR}/drop_nn_module_state_dict.pkl")
-# -
-
-# ## KF
 
 # +
 kf = Forecaster(
@@ -435,11 +447,11 @@ print(
 OUTPUT_DIR = os.path.join(PROJECT_ROOT, "output")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-df_test = pd.read_csv(os.path.join(DATA_DIR,"test.csv"), parse_dates=['timestamp'])
+df_test = pd.read_csv(os.path.join(DATA_DIR,"test.csv.gz"), parse_dates=['timestamp'])
 df_test['meter'] = df_test['meter'].map(meter_mapping).astype('category')
 df_mt_test = pd.concat([
     df_mt_trainval.\
-        loc[:,['building_id','timestamp','meter_reading_clean_pp']].\
+        loc[:,['building_id','timestamp','meter_reading_clean_pp','meter_reading','is_drop']].\
         assign(row_id=-1).\
         reset_index(drop=True),
     df_test.\
@@ -451,7 +463,7 @@ df_mt_test = pd.concat([
 df_mt_test['chunk'] = np.floor(df_mt_test['building_id'] / 50).astype('int')
 
 for chunk, df_in in df_mt_test.groupby('chunk'):
-    dl = dataloader_factory(df_in, reading_colname='meter_reading_clean_pp', batch_size=50)
+    dl = dataloader_factory(df_in, reading_colname='meter_reading_clean_pp', drop_colname=False, batch_size=50)
     assert len(dl) == 1
     batch = next(iter(dl)).split_measures(slice(1), slice(1, None))
     with torch.no_grad():
@@ -463,18 +475,50 @@ for chunk, df_in in df_mt_test.groupby('chunk'):
             predictors=predictors,
             progress=tqdm_notebook
         )
+        drop_pred = torch.sigmoid(drop_nn_module(predictors, batch.group_names))
+
     df_pred = pred.to_dataframe(batch, **colname_config).\
       query("measure == 'meter_reading_clean_pp'").\
-      drop(columns=['measure'])
+      drop(columns=['measure']).\
+      merge(
+        TimeSeriesDataset.tensor_to_dataframe(
+            tensor=drop_pred.unsqueeze(-1), 
+            times=batch.times(), 
+            group_names=batch.group_names, 
+            **colname_config, 
+            measures=['predicted_drop_prob']
+            )
+        ).\
+        merge(df_in.loc[:,['building_id', 'timestamp', 'row_id', 'meter_reading','is_drop']], 
+              how='left',
+              on=['building_id', 'timestamp'])
+    
+    df_pred = df_pred.merge(
+        df_pred.\
+            query('is_drop==1').\
+            assign(meter_reading_log1p=lambda df: np.log1p(df['meter_reading'])).\
+            groupby('building_id')\
+            ['meter_reading_log1p'].mean().\
+            reset_index().\
+            assign(avg_when_dropped = lambda df: np.expm1(df.pop('meter_reading_log1p'))),
+        how='left'
+        ).\
+        rename(columns={'predicted_mean' : 'meter_reading_clean_pp'}).\
+        pipe(mt_scaler.inverse_transform, keep_cols=['row_id','predicted_drop_prob','avg_when_dropped', 'meter_reading'])
+    
+    df_pred['_meter_reading'] = \
+        np.expm1(df_pred['meter_reading_clean_pp']) * (1-df_pred['predicted_drop_prob']) + \
+        df_pred['avg_when_dropped'].fillna(0.0) * (df_pred['predicted_drop_prob']) 
+    
+    sq_err = (np.log1p(df_pred['_meter_reading']) - np.log1p(df_pred['meter_reading'])) ** 2
+    print(f"MSE: {sq_err.mean():.3f}")
     
     df_out = df_pred.\
-      merge(df_in.loc[:,['building_id', 'timestamp', 'row_id']], on=['building_id', 'timestamp']).\
-      rename(columns={'predicted_mean' : 'meter_reading_clean_pp'}).\
-      pipe(mt_scaler.inverse_transform, keep_cols=['row_id']).\
-      assign(meter_reading = lambda df: np.expm1(df['meter_reading_clean_pp'])).\
+      assign(meter_reading=lambda df: df['_meter_reading']).\
       query("row_id >= 0").\
       loc[:,['row_id', 'meter_reading']].\
       reset_index(drop=True)
+
     path = os.path.join(OUTPUT_DIR, f"{METER_TYPE}-{chunk}.feather")
     print(path)
     df_out.to_feather(path)
